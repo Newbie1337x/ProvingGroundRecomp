@@ -23,8 +23,9 @@
 - **Higher resolutions.** Render at 1440p or 4K, with optional FXAA.
 - **Launcher and in-game menu.** Choose the game folder and the options before you play.
   **Insert** opens the options while playing. Settings are saved.
-- **Your files stay yours.** No game code or data is distributed. The launcher checks that
-  your `default.xex` is the version the build was made for.
+- **Bring your own game.** No game data, assets or disc files are included; the game runs
+  from your own extracted copy. The launcher checks that your `default.xex` is the version
+  the build was made for.
 
 ## Playing
 
