@@ -22,17 +22,29 @@ startup**; start with `--launcher` to bring it back.
 | --- | --- |
 | Display mode | Fullscreen or windowed. **F11** switches while playing. |
 | Frame rate | 30 FPS keeps the original console pacing. 60 and above run the game faster than the console could; cutscenes still play at their original speed. |
-| Resolution | 720p is the original. 1440p and 4K render at 2x and 3x; 1080p renders at 1440p and scales down. |
+| Upscaling | Off, or AMD FSR 3.1 (Windows). Applies on the next start. |
+| FSR mode | With FSR 3: Native AA, Quality, Balanced, Performance or Ultra Performance. Each picks the rendering resolution for your screen; the game can render at 720p, 1440p or 4K only, so the closest one is used and the menu shows which. |
+| Sharpness | FSR 3 sharpening, applied immediately. |
+| Resolution | Without FSR. 720p is the original. 1440p and 4K render at 2x and 3x; 1080p renders at 1440p and scales down. |
 | Anti-aliasing | Optional FXAA. |
+| Button icons | Automatic, Xbox or PlayStation. See Controls. |
 | Show FPS counter | A small counter in the top-right corner. |
 
-Press **Insert** in game for the options menu. Resolution and anti-aliasing apply on the next
-start.
+Press **Insert** in game for the options menu. Resolution, upscaling, FSR mode,
+anti-aliasing and button icons apply on the next start.
+
+About FSR: the game's renderer has no motion vectors or camera jitter to give FSR 3, so it
+rebuilds each frame on its own, without the temporal detail it adds in PC games. FSR 4 is not
+offered: AMD ships it for Direct3D 12 only, and this renderer is Vulkan.
 
 ## Controls
 
 Use an Xbox, PlayStation or other controller supported by SDL. It works as the Xbox 360
-controller did.
+controller did; on a PlayStation controller, Cross is A, Circle is B, Square is X and Triangle
+is Y.
+
+**Button icons** (launcher and Insert menu) picks the icons the game shows: Automatic shows
+PlayStation icons when a PlayStation controller is connected as the game starts.
 
 ## Files
 

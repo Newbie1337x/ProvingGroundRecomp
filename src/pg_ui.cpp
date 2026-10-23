@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -12,6 +13,14 @@
 #include <imgui.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
+#include <rex/platform.h>
+#include <rex/ui/presenter.h>
+
+#if REX_PLATFORM_WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 #include "pg_frame_pacing.h"
 
@@ -22,6 +31,18 @@ REXCVAR_DEFINE_STRING(render_resolution, "720p", "Video",
                       "resolution_scale when that is set.")
     .allowed({"720p", "1080p", "1440p", "4k"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_STRING(upscaler, "off", "Video",
+                      "How the rendered image is scaled to the screen: off (bilinear) or fsr3 "
+                      "(AMD FSR 3.1, in builds with FidelityFX)")
+    .allowed({"off", "fsr3"})
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_STRING(fsr_mode, "quality", "Video",
+                      "With FSR 3, picks the rendering resolution from the screen height: "
+                      "native (Native AA), quality (1.5x), balanced (1.7x), performance (2x) or "
+                      "ultra_performance (3x), using the closest resolution the game supports")
+    .allowed({"native", "quality", "balanced", "performance", "ultra_performance"})
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_INT32(sharpness, 80, "Video", "Upscaler sharpness, 0 to 100").range(0, 100);
 REXCVAR_DEFINE_BOOL(show_fps, false, "Video", "Show a frame rate counter in the corner");
 REXCVAR_DEFINE_BOOL(show_launcher, true, "General",
                     "Show the launcher at startup; it also appears when the game folder is not "
@@ -36,10 +57,71 @@ constexpr uintmax_t kExpectedXexSize = 10366976;
 constexpr uint64_t kExpectedXexHash = 0xa02344935b47f717ull;
 
 // Settings written to the config file, in this order.
-constexpr std::array<const char*, 7> kSavedSettings = {
-    "game_data_root", "render_resolution", "fullscreen",  "frame_rate_limit",
-    "swap_post_effect", "show_fps",        "show_launcher",
+constexpr std::array<const char*, 11> kSavedSettings = {
+    "game_data_root", "render_resolution", "upscaler",       "fsr_mode", "sharpness",
+    "fullscreen",     "frame_rate_limit",  "swap_post_effect", "button_prompts", "show_fps",
+    "show_launcher",
 };
+
+std::function<rex::ui::Presenter*()> g_presenter_source;
+uint32_t g_window_physical_height = 720;
+
+// Height of the screen the game is shown on.
+uint32_t DisplayHeight() {
+#if REX_PLATFORM_WIN32
+  if (rex::cvar::Query<bool>("fullscreen")) {
+    // The desktop mode of the primary monitor, in physical pixels whatever the DPI scale.
+    DEVMODEW mode = {};
+    mode.dmSize = sizeof(mode);
+    if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmPelsHeight) {
+      return mode.dmPelsHeight;
+    }
+  }
+#endif
+  return std::max<uint32_t>(g_window_physical_height, 1);
+}
+
+// Render scale (of the game's 1280x720) closest to the FSR mode's ratio for this screen height.
+int32_t FsrResolutionScale(const std::string& mode, uint32_t display_height) {
+  const double ratio = mode == "native"              ? 1.0
+                       : mode == "balanced"          ? 1.7
+                       : mode == "performance"       ? 2.0
+                       : mode == "ultra_performance" ? 3.0
+                                                     : 1.5;
+  const double target = double(display_height) / ratio;
+  int32_t best = 1;
+  double best_error = 1e9;
+  for (int32_t scale = 1; scale <= 3; ++scale) {
+    const double error = std::abs(std::log(720.0 * scale / target));
+    // Ties go to the larger scale.
+    if (error <= best_error + 1e-6) {
+      best = scale;
+      best_error = error;
+    }
+  }
+  return best;
+}
+
+// FSR 3 needs the FidelityFX runtime, which the presenter only offers in builds that have it.
+bool Fsr3Available() {
+  const auto* info = rex::cvar::GetFlagInfo("present_effect");
+  if (!info) return false;
+  const auto& allowed = info->constraints.allowed_values;
+  return std::find(allowed.begin(), allowed.end(), "fsr3") != allowed.end();
+}
+
+bool Fsr3Enabled() { return REXCVAR_GET(upscaler) == "fsr3" && Fsr3Available(); }
+
+int32_t RenderResolutionScale() {
+  if (Fsr3Enabled()) {
+    return FsrResolutionScale(REXCVAR_GET(fsr_mode), DisplayHeight());
+  }
+  const std::string resolution = REXCVAR_GET(render_resolution);
+  return resolution == "4k" ? 3 : resolution == "1440p" || resolution == "1080p" ? 2 : 1;
+}
+
+// FSR's sharpness parameter: stops of reduction, 0 is the sharpest.
+double FsrSharpnessReduction() { return 2.0 * (1.0 - REXCVAR_GET(sharpness) / 100.0); }
 
 std::string TomlString(const std::string& value) {
   // Literal strings keep Windows backslashes as they are.
@@ -108,13 +190,39 @@ void SaveSettings(const std::filesystem::path& config_path) {
 
 void ApplyStartupSettings() {
   ApplyFrameRateLimit();
+  ApplyUpscaler();
   if (rex::cvar::HasNonDefaultValue("resolution_scale")) return;
-  const std::string resolution = REXCVAR_GET(render_resolution);
-  const char* scale = resolution == "4k"                              ? "3"
-                      : resolution == "1440p" || resolution == "1080p" ? "2"
-                                                                       : "1";
-  rex::cvar::SetFlagByName("resolution_scale", scale);
-  REXLOG_INFO("Internal resolution {}: resolution_scale {}", resolution, scale);
+  const int32_t scale = RenderResolutionScale();
+  rex::cvar::SetFlagByName("resolution_scale", std::to_string(scale));
+  REXLOG_INFO("Rendering at {}p (resolution_scale {}), upscaler {}, screen height {}", 720 * scale,
+              scale, REXCVAR_GET(upscaler), DisplayHeight());
+}
+
+void SetPresenterSource(std::function<rex::ui::Presenter*()> source) {
+  g_presenter_source = std::move(source);
+}
+
+void SetWindowPhysicalHeight(uint32_t height) {
+  if (height) g_window_physical_height = height;
+}
+
+void ApplyUpscaler() {
+  // The game renders at the mode's resolution (resolution_scale) and FSR 3 takes that image to the
+  // screen; "nativeaa" makes the presenter run FSR also at 1:1 and never shrink its input first.
+  // The cvars cover a presenter created later; the paint config changes the running one.
+  const bool fsr3 = Fsr3Enabled();
+  rex::cvar::SetFlagByName("present_effect", fsr3 ? "fsr3" : "bilinear");
+  if (fsr3) rex::cvar::SetFlagByName("present_fsr_quality_mode", "nativeaa");
+  rex::cvar::SetFlagByName("present_fsr_sharpness_reduction",
+                           std::to_string(FsrSharpnessReduction()));
+  rex::ui::Presenter* presenter = g_presenter_source ? g_presenter_source() : nullptr;
+  if (!presenter) return;
+  using Config = rex::ui::Presenter::GuestOutputPaintConfig;
+  Config config = presenter->GetGuestOutputPaintConfigFromUIThread();
+  config.SetEffect(fsr3 ? Config::Effect::kFsr3 : Config::Effect::kBilinear);
+  if (fsr3) config.SetFsrQualityMode(Config::FsrQualityMode::kNativeAa);
+  config.SetFsrSharpnessReduction(float(FsrSharpnessReduction()));
+  presenter->SetGuestOutputPaintConfigFromUIThread(config);
 }
 
 GameFolderCheck CheckGameFolder(const std::filesystem::path& chosen) {
@@ -285,6 +393,64 @@ constexpr const char* kFrameRateHelp =
     "up to that rate; cutscenes keep their original speed.";
 constexpr const char* kAntiAliasingHelp = "Post-process anti-aliasing applied to each frame.";
 
+const std::vector<Choice> kUpscalers = {
+    {"off", "Off (bilinear)"},
+    {"fsr3", "AMD FSR 3.1"},
+};
+constexpr const char* kUpscalerHelp =
+    "How the rendered image is scaled to your screen. AMD FSR 3.1 upscales and sharpens it; with "
+    "Native AA it works at your screen's resolution.\n\nThe game's renderer has no motion "
+    "vectors or camera jitter to give FSR, so it rebuilds each frame on its own, without the "
+    "temporal detail it adds in PC games.\n\nFSR 4 is not offered: AMD ships it for Direct3D 12 "
+    "only, and this renderer is Vulkan.";
+constexpr const char* kFsrModeHelp =
+    "Picks the rendering resolution for your screen, like the FSR presets in PC games. The game "
+    "can render at 720p, 1440p or 4K only, so the closest one is used.";
+const std::vector<Choice> kButtonPrompts = {
+    {"auto", "Automatic"},
+    {"xbox", "Xbox"},
+    {"playstation", "PlayStation"},
+};
+constexpr const char* kButtonPromptsHelp =
+    "Button icons shown in the game. Automatic shows PlayStation icons when a PlayStation "
+    "controller is connected as the game starts.";
+
+std::vector<Choice> FsrModeChoices() {
+  static const std::array<std::pair<const char*, const char*>, 5> kModes = {{
+      {"native", "Native AA"},
+      {"quality", "Quality"},
+      {"balanced", "Balanced"},
+      {"performance", "Performance"},
+      {"ultra_performance", "Ultra Performance"},
+  }};
+  // The labels show the rendering resolution each mode gives on this screen.
+  static std::array<std::string, 5> labels;
+  std::vector<Choice> choices;
+  const uint32_t height = DisplayHeight();
+  for (size_t i = 0; i < kModes.size(); ++i) {
+    const int32_t scale = FsrResolutionScale(kModes[i].first, height);
+    labels[i] = std::string(kModes[i].second) + "  -  renders " + std::to_string(720 * scale) + "p";
+    choices.push_back({kModes[i].first, labels[i].c_str()});
+  }
+  return choices;
+}
+
+bool SharpnessSetting() {
+  int value = REXCVAR_GET(sharpness);
+  return Row("Sharpness", "Sharpening strength of the upscaler. Changes apply immediately.", [&] {
+    if (!ImGui::SliderInt("##sharpness", &value, 0, 100, "%d%%")) return false;
+    return rex::cvar::SetFlagByName("sharpness", std::to_string(value));
+  });
+}
+
+void MutedNote(const char* text) {
+  ImGui::PushStyleColor(ImGuiCol_Text, kMutedColor);
+  PushFont(g_small);
+  ImGui::TextWrapped("%s", text);
+  ImGui::PopFont();
+  ImGui::PopStyleColor();
+}
+
 bool GraphicsSettings(bool in_game) {
   bool changed = false;
   changed |= DisplayModeSetting();
@@ -292,15 +458,37 @@ bool GraphicsSettings(bool in_game) {
     ApplyFrameRateLimit();
     changed = true;
   }
-  changed |= ComboSetting("Resolution", "render_resolution", kResolutions, kResolutionHelp);
+  if (Fsr3Available()) {
+    changed |= ComboSetting("Upscaling", "upscaler", kUpscalers, kUpscalerHelp);
+  }
+  const bool fsr = Fsr3Enabled();
+  if (fsr) {
+    changed |= ComboSetting("FSR mode", "fsr_mode", FsrModeChoices(), kFsrModeHelp);
+    if (SharpnessSetting()) {
+      ApplyUpscaler();
+      changed = true;
+    }
+  } else {
+    changed |= ComboSetting("Resolution", "render_resolution", kResolutions, kResolutionHelp);
+  }
   changed |= ComboSetting("Anti-aliasing", "swap_post_effect", kAntiAliasing, kAntiAliasingHelp);
+  changed |= ComboSetting("Button icons", "button_prompts", kButtonPrompts, kButtonPromptsHelp);
   changed |= ToggleSetting("Show FPS counter", "show_fps", nullptr);
+
+  const uint32_t render = 720u * uint32_t(RenderResolutionScale());
+  const uint32_t screen = DisplayHeight();
+  char summary[160];
+  if (render < screen) {
+    std::snprintf(summary, sizeof(summary), "Renders at %up and %s to your %up screen (%.2gx).",
+                  render, fsr ? "FSR upscales it" : "is scaled up", screen,
+                  double(screen) / double(render));
+  } else {
+    std::snprintf(summary, sizeof(summary), "Renders at %up for your %up screen.", render, screen);
+  }
+  MutedNote(summary);
   if (in_game) {
-    ImGui::PushStyleColor(ImGuiCol_Text, kMutedColor);
-    PushFont(g_small);
-    ImGui::TextWrapped("Resolution and anti-aliasing apply the next time the game starts.");
-    ImGui::PopFont();
-    ImGui::PopStyleColor();
+    MutedNote("Resolution, upscaling, FSR mode, anti-aliasing and button icons apply the next "
+              "time the game starts.");
   }
   return changed;
 }

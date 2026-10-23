@@ -33,8 +33,8 @@ Requirements:
 
 Keep the repository in a short path (for example `C:\src\ProvingGroundRecomp`): some SDK
 files have long names. Other options: `-Jobs`, `-CodegenOnly`, `-NoStage`, `-SdkSource` (use
-an existing patched SDK tree), `-FidelityFX` (build AMD FidelityFX into the renderer; off by
-default and not used by releases).
+an existing patched SDK tree), `-NoFidelityFX` (leave out AMD FidelityFX, which the FSR 3
+option needs; Linux builds never include it).
 
 ## Linux
 

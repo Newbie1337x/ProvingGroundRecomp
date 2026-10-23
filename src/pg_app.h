@@ -200,7 +200,10 @@ class PgApp : public rex::ReXApp {
   }
 
   void OnConfigureFonts(ImFontAtlas* atlas) override {
-    if (window()) pg::ui::SetScale(float(window()->GetActualLogicalHeight()));
+    if (window()) {
+      pg::ui::SetScale(float(window()->GetActualLogicalHeight()));
+      pg::SetWindowPhysicalHeight(window()->GetActualPhysicalHeight());
+    }
     pg::ui::ConfigureFonts(atlas);
   }
 
@@ -232,6 +235,8 @@ class PgApp : public rex::ReXApp {
       pg::SaveSettings(config_path_);
     });
     fps_overlay_ = std::make_unique<pg::FpsOverlay>(drawer);
+    pg::SetPresenterSource([drawer] { return drawer->presenter(); });
+    pg::ApplyUpscaler();
   }
 
   std::optional<rex::PathConfig> OnFinalizePaths(

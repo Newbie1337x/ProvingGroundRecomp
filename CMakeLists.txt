@@ -67,6 +67,8 @@ endif()
 
 set(PG_SOURCES
     src/main.cpp
+    src/pg_buttons.cpp
+    src/pg_dev.cpp
     src/pg_folder_picker.cpp
     src/pg_frame_pacing.cpp
     src/pg_input_script.cpp
@@ -82,7 +84,7 @@ endif()
 set_target_properties(pg PROPERTIES OUTPUT_NAME ProvingGround)
 # The SDK's runtime does not export the ImGui include directory to host applications.
 target_include_directories(pg PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${REXSDK_DIR}/thirdparty/imgui")
-target_link_libraries(pg PRIVATE pg_recomp rex::runtime)
+target_link_libraries(pg PRIVATE pg_recomp rex::runtime SDL3::SDL3)
 if(WIN32)
     target_link_libraries(pg PRIVATE dbghelp winmm psapi ole32 uuid)
 endif()

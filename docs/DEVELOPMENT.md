@@ -7,6 +7,7 @@
 | `src/main.cpp`, `src/pg_app.h` | The host application: paths, launcher flow, menus, default renderer settings. |
 | `src/pg_ui.*`, `src/pg_folder_picker.cpp` | Launcher, Insert menu, FPS counter, settings file, game folder check. |
 | `src/pg_frame_pacing.*` | Frame rate limit and the fixes that keep the game's clocks right when uncapped. |
+| `src/pg_buttons.cpp`, `tools/gen_ps_buttons.py` | PlayStation button icons: our art, patched into the game's button font when it is decompressed. |
 | `src/pg_input_script.*` | Controller input recording and replay for repeatable test routes. |
 | `src/pg_sampler.*` | In-process sampling CPU profiler (Windows). |
 | `src/pg_timeline_hooks.cpp` | Timed wrappers around game functions for `--timeline_trace`. |
@@ -39,7 +40,11 @@ retire swaps quickly; at a real 60 Hz the game drops to 30 FPS every few seconds
 - the engine's vblank counter advances only once per real 1/60 s;
 - inside the swap, the vblank-count getter `sub_8234BE28` returns a private count that
   advances on every read, so the interval-2 waits end at once, while the cutscene cameras
-  still read the real count.
+  still read the real count;
+- the Havok step: each frame `sub_82418560` hands the physics thread (`sub_8268D868`) a step
+  of game speed x 1/30 s through the setters `sub_8268D3B0` and `sub_8268D3A8`. That is real
+  time at the console's 30 FPS, but above it ragdolls fell too fast (twice the speed at 60
+  FPS). The hooks scale the step by the engine's frame time (the float at `0x82A1D0B4`).
 
 `frame_rate_limit` then holds the game at a chosen rate with a high-resolution timer after
 each swap. 30 restores the original vsync pacing. `--uncapped_real_time=false` disables the
@@ -49,8 +54,9 @@ fixes.
 
 Every setting is a cvar: it can go in `pg.toml` next to the executable or on the command line
 (`--name=value`). The launcher and the Insert menu write `game_data_root`,
-`render_resolution`, `fullscreen`, `frame_rate_limit`, `swap_post_effect`, `show_fps` and
-`show_launcher`, and keep any other lines in the file.
+`render_resolution`, `upscaler`, `fsr_mode`, `sharpness`, `fullscreen`, `frame_rate_limit`,
+`swap_post_effect`, `button_prompts`, `show_fps` and `show_launcher`, and keep any other lines
+in the file.
 
 | Flag | |
 | --- | --- |

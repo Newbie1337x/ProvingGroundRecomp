@@ -9,9 +9,12 @@
 // ran many times too fast. Here both intervals are 0, so the game doesn't wait for vblanks, and
 // the engine's counter only advances once per real 1/60 s.
 #include "pg_frame_pacing.h"
+#include "pg_dev.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <thread>
 
 #include <rex/cvar.h>
@@ -36,6 +39,18 @@ namespace {
 constexpr uint32_t kMainLoopIntervalChecksum = 0xE8DE9454;
 // Presentation interval of the swap, in the game's data (1 in the image).
 constexpr uint32_t kSwapIntervalAddress = 0x828D400C;
+// The engine's frame time in seconds (float), averaged over the last four frames
+// (written by sub_8234C108, read by sub_8234BE38).
+constexpr uint32_t kFrameDeltaAddress = 0x82A1D0B4;
+
+float LoadGuestFloat(const uint8_t* base, uint32_t address) {
+  uint32_t bits;
+  std::memcpy(&bits, base + address, sizeof(bits));
+  bits = __builtin_bswap32(bits);
+  float value;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
 
 bool Uncapped() {
   if (!REXCVAR_GET(uncapped_real_time)) {
@@ -139,6 +154,7 @@ extern "C" void sub_824853A8(PPCContext& __restrict ctx, uint8_t* base) {
   in_swap = false;
   LimitFrameRate();
   CountFrame(Clock::now());
+  pg::dev::OnSwap(base);
 }
 
 // Getter of the engine's vblank count. After each frame the swap also waits for this count to
@@ -155,6 +171,28 @@ extern "C" void sub_8234BE28(PPCContext& __restrict ctx, uint8_t* base) {
     return;
   }
   __imp__sub_8234BE28(ctx, base);
+}
+
+// Havok physics step. Each frame sub_82418560 hands the physics thread (sub_8268D868) a step of
+// game speed x 1/30 s through these two setters: real time at the console's 30 FPS, but above
+// 30 FPS ragdolls and other rigid bodies ran too fast (a bailing skater hit the ground at twice
+// the speed at 60 FPS). Scale the step by the engine's measured frame time, which is the same
+// 1/30 s at 30 FPS.
+static double PhysicsStepScale(const uint8_t* base) {
+  const double frame = LoadGuestFloat(base, kFrameDeltaAddress);
+  return frame > 0.0 ? std::clamp(frame * 30.0, 0.01, 1.0) : 1.0;
+}
+
+extern "C" void __imp__sub_8268D3B0(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_8268D3B0(PPCContext& __restrict ctx, uint8_t* base) {
+  if (Uncapped()) ctx.f1.f64 *= PhysicsStepScale(base);
+  __imp__sub_8268D3B0(ctx, base);
+}
+
+extern "C" void __imp__sub_8268D3A8(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_8268D3A8(PPCContext& __restrict ctx, uint8_t* base) {
+  if (Uncapped()) ctx.f1.f64 *= PhysicsStepScale(base);
+  __imp__sub_8268D3A8(ctx, base);
 }
 
 extern "C" void __imp__sub_8234BD00(PPCContext& __restrict ctx, uint8_t* base);

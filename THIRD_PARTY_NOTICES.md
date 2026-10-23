@@ -39,7 +39,10 @@ the releases. The game is recompiled from, and runs with, files from your own co
 | Component | When | License |
 | --- | --- | --- |
 | Tracy profiler client | RelWithDebInfo and Debug builds | BSD 3-Clause |
-| AMD FidelityFX SDK | Only with `build.ps1 -FidelityFX` (off by default; not in releases) | MIT |
+| AMD FidelityFX SDK (FSR 3 upscaler) | Windows builds, unless built with `build.ps1 -NoFidelityFX` | MIT |
+
+The PlayStation button icons are drawn by `tools/gen_ps_buttons.py` from shapes and the
+Aileron font bundled with Pillow (CC0). They contain nothing from the game.
 
 Fonts are not bundled: the interface uses a font already installed on the system (Segoe UI on
 Windows, Noto Sans or DejaVu Sans on Linux).

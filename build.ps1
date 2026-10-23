@@ -16,8 +16,9 @@ param(
     [string]$SdkSource = $env:REXSDK_SOURCE,
     # Folder with clang.exe/clang++.exe, if not the one that comes with Visual Studio.
     [string]$LlvmBin = $env:LLVM_BIN,
-    # Build AMD FidelityFX into the renderer (downloads the FidelityFX SDK).
-    [switch]$FidelityFX,
+    # Leave AMD FidelityFX (the FSR 3 upscaler option) out of the renderer. It is built by
+    # default, which downloads the FidelityFX SDK.
+    [switch]$NoFidelityFX,
     # Only generate the code; do not build the game.
     [switch]$CodegenOnly,
     # Skip copying the game and its libraries to out\dist.
@@ -25,6 +26,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$FidelityFX = -not $NoFidelityFX
 $repo = $PSScriptRoot
 $sdkTag = 'v0.10.0'
 $sdkUrl = 'https://github.com/rexglue/rexglue-sdk.git'
@@ -158,6 +160,9 @@ $rexglue = @($build, (Join-Path $sdk 'out')) | Where-Object { Test-Path -Literal
     ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -Filter $toolName } |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $rexglue) { throw 'The rexglue code generator was not built.' }
+# FidelityFX writes its runtime DLL to bin\ in the repository; the tool and the game load it.
+$ffxBin = Join-Path $repo 'bin'
+if ($FidelityFX) { $env:PATH = "$ffxBin;$env:PATH" }
 Invoke-Step 'codegen' $rexglue.FullName @('codegen', (Join-Path $repo 'pg_config.toml'))
 if ($CodegenOnly) { Write-Host 'Code generated in generated\.'; exit 0 }
 
@@ -165,6 +170,9 @@ Configure 'ON'
 Invoke-Step 'build-game' $cmake @('--build', $build, '--target', 'pg', '--parallel', "$Jobs")
 $exe = Join-Path $build 'ProvingGround.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw "Build finished but $exe is missing." }
+if ($FidelityFX) {
+    Get-ChildItem -LiteralPath $ffxBin -Filter 'amd_fidelityfx_*.dll' | Copy-Item -Destination $build
+}
 
 if (-not $NoStage) {
     $dist = Join-Path $repo 'out\dist\ProvingGroundRecomp'

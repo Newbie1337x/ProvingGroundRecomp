@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -10,6 +11,10 @@
 struct ImFontAtlas;
 struct ImGuiStyle;
 
+namespace rex::ui {
+class Presenter;
+}
+
 namespace pg {
 
 // Settings shown in the launcher and the in-game menu, saved next to the executable.
@@ -17,6 +22,13 @@ void SaveSettings(const std::filesystem::path& config_path);
 
 // Applies the settings that the GPU reads when the runtime starts (internal resolution).
 void ApplyStartupSettings();
+
+// Where the upscaler settings are applied while running; returns null before there is one.
+void SetPresenterSource(std::function<rex::ui::Presenter*()> source);
+// Height in pixels of the screen the game is shown on: the monitor in fullscreen, else the window.
+void SetWindowPhysicalHeight(uint32_t height);
+// Applies the upscaler and sharpness settings to the presenter immediately.
+void ApplyUpscaler();
 
 // What the launcher found in a candidate game folder.
 struct GameFolderCheck {
