@@ -23,4 +23,7 @@ SOFTWARE.
 This license covers the source code in this repository. It grants no rights to
 Tony Hawk's Proving Ground, its code, data or trademarks, which belong to their
 owners. patches/rexglue-sdk.patch modifies the ReXGlue SDK and is under the
-SDK's BSD 3-Clause license; see THIRD_PARTY_NOTICES.md.
+SDK's BSD 3-Clause license; see THIRD_PARTY_NOTICES.md. The function hints in
+pg_config.toml come from SunJaycy's ProvingGroundRecomp, which was published
+without a license; they remain the work of their author and are not covered by
+the MIT license above.
