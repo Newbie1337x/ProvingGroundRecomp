@@ -1,0 +1,16 @@
+# Build output, local settings and tools
+/out/
+/.local/
+/CMakeUserPresets.json
+/bin/
+/tools/windows-*/
+*.log
+
+# Fetched and patched by the build scripts
+/thirdparty/
+
+# Game files and the code generated from them are never committed
+/rom/
+/assets/**
+!/assets/README.txt
+/generated/
