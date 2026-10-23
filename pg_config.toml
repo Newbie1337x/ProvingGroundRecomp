@@ -1,5 +1,6 @@
 # ReXGlue 0.10.0 manifest. Paths are relative to this file.
-# Addresses below are inherited hints, not yet verified against our game dump.
+# Function addresses the analysis misses on its own, first found by SunJaycy's
+# ProvingGroundRecomp; verified with the supported default.xex.
 
 [project]
 name = "pg"
