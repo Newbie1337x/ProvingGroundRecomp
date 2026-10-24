@@ -2,11 +2,12 @@
 
 Proving Ground Recompiled is built on the ReXGlue SDK, which the build scripts fetch from
 its own repository. The game binaries include the SDK runtime and the libraries below. Each
-keeps its own license; the full texts are in the SDK checkout
-(`thirdparty/rexglue-sdk/LICENSE` and `thirdparty/rexglue-sdk/thirdparty/*/`).
+keeps its own license; the full texts are in the `licenses` folder of each release, and in the
+SDK checkout (`thirdparty/rexglue-sdk/LICENSE` and `thirdparty/rexglue-sdk/thirdparty/*/`).
 
-No game code or data from Tony Hawk's Proving Ground is included in this repository or in
-the releases. The game is recompiled from, and runs with, files from your own copy.
+This repository contains no code or data from Tony Hawk's Proving Ground. The released
+`ProvingGround.exe` contains code statically translated from the game's `default.xex`; it
+contains no game data or assets, and runs with the files of your own copy.
 
 ## Runtime
 
@@ -30,7 +31,7 @@ the releases. The game is recompiled from, and runs with, files from your own co
 | SPIRV-Tools | Apache 2.0 | https://github.com/KhronosGroup/SPIRV-Tools |
 | o1heap | MIT | https://github.com/pavel-kirienko/o1heap |
 | UTF8-CPP | Boost 1.0 | https://github.com/nemtrif/utfcpp |
-| stb_image | MIT / public domain | https://github.com/nothings/stb |
+| stb_image | public domain / MIT (text at the end of `stb_image.h`) | https://github.com/nothings/stb |
 | aes_128 | MIT | https://github.com/openluopworld/aes_128 |
 | tiny-AES-c | Unlicense | https://github.com/kokke/tiny-AES-c |
 
@@ -40,7 +41,10 @@ the releases. The game is recompiled from, and runs with, files from your own co
 | --- | --- | --- |
 | Tracy profiler client | RelWithDebInfo and Debug builds | BSD 3-Clause |
 | AMD FidelityFX SDK 1.1.4 (FSR 3.1, Vulkan) | Windows builds, unless built with `build.ps1 -NoFidelityFX` | MIT |
-| AMD FSR SDK 2.3.0 Direct3D 12 runtime (FSR 4), signed DLLs | Windows builds, unless built with `build.ps1 -NoD3D12` | MIT |
+| AMD FSR SDK 2.3.0 Direct3D 12 runtime (FSR 4), signed DLLs | Windows builds, unless built with `build.ps1 -NoD3D12` | AMD's FidelityFX SDK license (`licenses/FidelityFX-SDK-2.3.0.md`): redistributed unmodified, in binary form |
+
+The launcher's design follows the launcher of
+[bloodborne_pc](https://github.com/deadinside28/bloodborne_pc); no code is taken from it.
 
 The PlayStation button icons are drawn by `tools/gen_ps_buttons.py` from shapes and the
 Aileron font bundled with Pillow (CC0). They contain nothing from the game.

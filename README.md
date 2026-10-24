@@ -89,11 +89,16 @@ Developer documentation: [frame pacing, performance tools and profiling](docs/DE
   [Xenia](https://github.com/xenia-project/xenia) project, whose work the runtime builds on.
 - The Tony Hawk's Project 8 recompilation project, for the vblank deadline wait adapted
   in the SDK patch.
+- The launcher's look follows the GNOME-style launcher of
+  [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) by deadinside28 (design only;
+  no code is taken from it).
+- AMD, for FSR 3.1 (FidelityFX SDK) and the FSR 4 runtime.
 
 ## Legal
 
 This project is not affiliated with or endorsed by Activision, Neversoft or Microsoft.
 Tony Hawk's Proving Ground and all related trademarks belong to their respective owners. This
 repository contains no game code, data or assets; you need your own legally obtained copy of
-the game. The source code is under the [MIT license](LICENSE); see
+the game. The released executable contains code translated from the game's `default.xex`, but
+no game data or assets. The source code is under the [MIT license](LICENSE); see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the components it builds on.

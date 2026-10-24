@@ -180,18 +180,20 @@ if ($FidelityFX) {
     Get-ChildItem -LiteralPath $ffxBin -Filter 'amd_fidelityfx_*.dll' | Copy-Item -Destination $build
 }
 if ($FidelityFX -and $D3D12) {
-    # FSR 4 comes only as AMD's signed D3D12 binaries of the FSR SDK 2 (MIT), which the D3D12
-    # presenter loads at run time: fetch them once, checked against known hashes.
+    # FSR 4 comes only as AMD's signed D3D12 binaries of the FSR SDK 2, which the D3D12
+    # presenter loads at run time: fetch them and their license once, checked against known hashes.
     $ffxDx12 = Join-Path $repo 'out\fidelityfx-dx12-v2.3.0'
     $ffxDx12Files = @{
         'amd_fidelityfx_loader_dx12.dll'   = 'e2d85aa05a9bd9ed8b38935fdf5199372cca6f74c12015143bb6f945ee1608aa'
         'amd_fidelityfx_upscaler_dx12.dll' = 'd0dcccc74a43c44ba435b7a369b456e0970d8a4464e4bd683119b374f2c9fb46'
+        'license.md'                       = '6757f2fec461238da6f84f83536ec195e8c036b1773a06f6f34301b9ed8c0963'
     }
     New-Item -ItemType Directory -Force -Path $ffxDx12 | Out-Null
     foreach ($name in $ffxDx12Files.Keys) {
         $file = Join-Path $ffxDx12 $name
         if (-not (Test-Path -LiteralPath $file)) {
             $url = "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v2.3.0/Kits/FidelityFX/signedbin/$name"
+            if ($name -eq 'license.md') { $url = 'https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v2.3.0/docs/license.md' }
             Write-Host "Downloading $name (FidelityFX SDK 2.3.0)"
             Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing
         }
@@ -199,7 +201,7 @@ if ($FidelityFX -and $D3D12) {
             Remove-Item -LiteralPath $file
             throw "$name does not match the expected FidelityFX SDK 2.3.0 file"
         }
-        Copy-Item -LiteralPath $file -Destination $build
+        if ($name -like '*.dll') { Copy-Item -LiteralPath $file -Destination $build }
     }
 }
 
@@ -212,6 +214,37 @@ if (-not $NoStage) {
     Copy-Item -LiteralPath (Join-Path $repo 'LICENSE') -Destination $dist
     Copy-Item -LiteralPath (Join-Path $repo 'THIRD_PARTY_NOTICES.md') -Destination $dist
     Copy-Item -LiteralPath (Join-Path $repo 'docs\PLAYING.md') -Destination (Join-Path $dist 'README.md')
+    # The license texts of everything in the executable and the DLLs (see THIRD_PARTY_NOTICES.md).
+    $licenses = Join-Path $dist 'licenses'
+    New-Item -ItemType Directory -Force -Path $licenses | Out-Null
+    $licenseFiles = [ordered]@{
+        'ReXGlue-SDK.txt'             = Join-Path $sdk 'LICENSE'
+        'FFmpeg-LGPL-2.1.txt'         = Join-Path $sdk 'thirdparty\FFmpeg\COPYING.LGPLv2.1'
+        'FFmpeg.md'                   = Join-Path $sdk 'thirdparty\FFmpeg\LICENSE.md'
+        'libmspack-LGPL-2.1.txt'      = Join-Path $sdk 'thirdparty\libmspack\libmspack\COPYING.LIB'
+        'SDL3.txt'                    = Join-Path $sdk 'thirdparty\sdl3\LICENSE.txt'
+        'DearImGui.txt'               = Join-Path $sdk 'thirdparty\imgui\LICENSE.txt'
+        'fmt.txt'                     = Join-Path $sdk 'thirdparty\fmt\LICENSE'
+        'spdlog.txt'                  = Join-Path $sdk 'thirdparty\spdlog\LICENSE'
+        'tomlplusplus.txt'            = Join-Path $sdk 'thirdparty\tomlplusplus\LICENSE'
+        'CLI11.txt'                   = Join-Path $sdk 'thirdparty\cli11\LICENSE'
+        'xxHash.txt'                  = Join-Path $sdk 'thirdparty\xxHash\LICENSE'
+        'SIMDe.txt'                   = Join-Path $sdk 'thirdparty\simde\COPYING'
+        'Vulkan-Headers.md'           = Join-Path $sdk 'thirdparty\vulkan-headers\LICENSE.md'
+        'VulkanMemoryAllocator.txt'   = Join-Path $sdk 'thirdparty\vulkan-memory-allocator\LICENSE.txt'
+        'glslang.txt'                 = Join-Path $sdk 'thirdparty\glslang\LICENSE.txt'
+        'SPIRV-Tools.txt'             = Join-Path $sdk 'thirdparty\spirv-tools\LICENSE'
+        'o1heap.txt'                  = Join-Path $sdk 'thirdparty\o1heap\LICENSE'
+        'utfcpp.txt'                  = Join-Path $sdk 'thirdparty\utfcpp\LICENSE'
+        'aes_128.txt'                 = Join-Path $sdk 'thirdparty\aes_128\LICENSE'
+        'Project8Recomp-BSD-3-Clause.txt' = Join-Path $repo 'licenses\Project8Recomp-BSD-3-Clause.txt'
+    }
+    if ($Configuration -ne 'Release') { $licenseFiles['Tracy.txt'] = Join-Path $sdk 'thirdparty\tracy\LICENSE' }
+    if ($FidelityFX) { $licenseFiles['FidelityFX-SDK-1.1.4.txt'] = Join-Path $build '_deps\fidelityfx-src\LICENSE.txt' }
+    if ($FidelityFX -and $D3D12) { $licenseFiles['FidelityFX-SDK-2.3.0.md'] = Join-Path $ffxDx12 'license.md' }
+    foreach ($name in $licenseFiles.Keys) {
+        Copy-Item -LiteralPath $licenseFiles[$name] -Destination (Join-Path $licenses $name)
+    }
     Write-Host "Ready to play: $dist\ProvingGround.exe" -ForegroundColor Green
 } else {
     Write-Host "Built: $exe" -ForegroundColor Green
