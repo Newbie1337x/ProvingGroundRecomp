@@ -22,20 +22,21 @@ startup**; start with `--launcher` to bring it back.
 | --- | --- |
 | Display mode | Fullscreen or windowed. **F11** switches while playing. |
 | Frame rate | 30 FPS keeps the original console pacing. 60 and above run the game faster than the console could; cutscenes still play at their original speed. |
-| Upscaling | Off, or AMD FSR 3.1 (Windows). Applies on the next start. |
-| FSR mode | With FSR 3: Native AA, Quality, Balanced, Performance or Ultra Performance. Each picks the rendering resolution for your screen; the game can render at 720p, 1440p or 4K only, so the closest one is used and the menu shows which. |
-| Sharpness | FSR 3 sharpening, applied immediately. |
-| Resolution | Without FSR. 720p is the original. 1440p and 4K render at 2x and 3x; 1080p renders at 1440p and scales down. |
+| Renderer | Vulkan (main, fastest) or Direct3D 12 (Windows; the one with FSR 4). Changing it restarts the game when you press **PLAY**. |
+| Upscaling | Off, or AMD FSR (3.1 with Vulkan, 4 with Direct3D 12): it scales the internal resolution to your screen. The menu names the matching FSR preset, e.g. on a 1440p screen 720p is Performance and 1440p is Native AA. |
+| Sharpness | FSR sharpening, applied immediately. Lower it if small text looks uneven. |
+| Internal resolution | What the game renders at. 720p is the original. 1440p and 4K render at 2x and 3x; 1080p renders at 1440p. |
 | Anti-aliasing | Optional FXAA. |
 | Button icons | Automatic, Xbox or PlayStation. See Controls. |
 | Show FPS counter | A small counter in the top-right corner. |
 
-Press **Insert** in game for the options menu. Resolution, upscaling, FSR mode,
+Press **Insert** in game for the options menu. Renderer, resolution, upscaling,
 anti-aliasing and button icons apply on the next start.
 
-About FSR: the game's renderer has no motion vectors or camera jitter to give FSR 3, so it
-rebuilds each frame on its own, without the temporal detail it adds in PC games. FSR 4 is not
-offered: AMD ships it for Direct3D 12 only, and this renderer is Vulkan.
+About FSR: FSR 4 exists for Direct3D 12 only. With the Direct3D 12 renderer the game uses AMD's
+FSR 4 runtime, which runs FSR 4.1.1 on Radeon RX 7000 and 9000 cards and FSR 3.1 on other GPUs.
+The game's renderer has no motion vectors or camera jitter to give FSR, so it rebuilds each
+frame on its own, without the temporal detail it adds in PC games.
 
 ## Controls
 

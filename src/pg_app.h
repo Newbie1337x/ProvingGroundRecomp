@@ -65,7 +65,16 @@ class PgApp : public rex::ReXApp {
 
     // The GPU cvars are registered when the plugin DLL loads, which ReXApp does only after this
     // hook; load it here so the defaults below can be set before the GPU reads them in Setup.
-    if (!config.graphics) config.graphics = rex::system::LoadGpuPlugin(config.gpu_plugin);
+    // FSR 4 needs the Direct3D 12 renderer, everything else runs on Vulkan.
+    if (!config.graphics) {
+      renderer_ = pg::RequiredRenderer();
+      config.graphics = rex::system::LoadGpuPlugin(config.gpu_plugin, renderer_);
+      if (!config.graphics && renderer_ != "vulkan") {
+        REXLOG_WARN("No {} renderer in this build; using Vulkan", renderer_);
+        renderer_ = "vulkan";
+        config.graphics = rex::system::LoadGpuPlugin(config.gpu_plugin, renderer_);
+      }
+    }
     // The main 3D pass keeps the world matrix in c216-c219 and world-view-projection in
     // c224-c227, which FSR 3 frame generation needs for the camera motion vectors.
     if (config.graphics && !rex::cvar::HasNonDefaultValue("fsr3_camera_world_constant")) {
@@ -271,6 +280,11 @@ class PgApp : public rex::ReXApp {
         [this, defaults, resume](const std::filesystem::path& game_folder) {
           rex::PathConfig paths = defaults;
           paths.game_data_root = game_folder;
+          // The renderer is set up before the launcher shows; switching it takes a new process.
+          if (pg::RequiredRenderer() != renderer_ && pg::Relaunch(game_folder)) {
+            app_context().CallInUIThreadDeferred([this] { app_context().QuitFromUIThread(); });
+            return;
+          }
           // Leave the dialog's draw before tearing it down and starting the game.
           app_context().CallInUIThreadDeferred([this, paths, resume] {
             launcher_.reset();
@@ -301,6 +315,8 @@ class PgApp : public rex::ReXApp {
   PgInputScript* input_script_ = nullptr;
   std::unique_ptr<PgSampler> sampler_;
   std::filesystem::path config_path_;
+  // The renderer the GPU plugin was started with ("vulkan" or "d3d12").
+  std::string renderer_ = "vulkan";
   std::unique_ptr<pg::Launcher> launcher_;
   std::unique_ptr<pg::GameMenu> menu_;
   std::unique_ptr<pg::FpsOverlay> fps_overlay_;

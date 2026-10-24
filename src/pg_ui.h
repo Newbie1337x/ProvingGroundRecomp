@@ -30,6 +30,11 @@ void SetWindowPhysicalHeight(uint32_t height);
 // Applies the upscaler and sharpness settings to the presenter immediately.
 void ApplyUpscaler();
 
+// The renderer the settings need: "d3d12" for FSR 4, else "vulkan". It is chosen at startup.
+const char* RequiredRenderer();
+// Starts the game again with the same command line, straight into this game folder.
+bool Relaunch(const std::filesystem::path& game_folder);
+
 // What the launcher found in a candidate game folder.
 struct GameFolderCheck {
   enum class Status { kEmpty, kMissing, kUnknownVersion, kOk };

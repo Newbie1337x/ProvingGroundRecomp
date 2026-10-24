@@ -911,6 +911,28 @@ index b3947e0..c362cf8 100644
 +#define PROFILE_SCOPE_TIME_NS(id)
  
  #endif
+diff --git a/include/rex/ui/d3d12/d3d12_presenter.h b/include/rex/ui/d3d12/d3d12_presenter.h
+index 83d09f7..286f34c 100644
+--- a/include/rex/ui/d3d12/d3d12_presenter.h
++++ b/include/rex/ui/d3d12/d3d12_presenter.h
+@@ -262,7 +262,7 @@ class D3D12Presenter final : public Presenter {
+ 
+   bool InitializeSurfaceIndependent();
+ 
+-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
++#if defined(REX_HAS_FFX_SPATIAL)
+   bool EnsureTemporalUpscalerContext(uint32_t render_width, uint32_t render_height,
+                                      uint32_t output_width, uint32_t output_height);
+   bool DispatchTemporalUpscaler(ID3D12GraphicsCommandList* command_list,
+@@ -312,7 +312,7 @@ class D3D12Presenter final : public Presenter {
+   // well as by presenter initialization and shutdown.
+   PaintContext paint_context_;
+ 
+-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
++#if defined(REX_HAS_FFX_SPATIAL)
+   void* temporal_upscaler_context_ = nullptr;
+   uint32_t temporal_upscaler_max_render_width_ = 0;
+   uint32_t temporal_upscaler_max_render_height_ = 0;
 diff --git a/include/rex/ui/frame_generation_stats.h b/include/rex/ui/frame_generation_stats.h
 new file mode 100644
 index 0000000..85e64d9
@@ -5618,10 +5640,19 @@ index 76cc877..465b5d0 100644
                           (system_page_last + 1 - protect_system_page_first) * system_page_size_,
                           protect_access);
 diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
-index 5bd3dc5..1fbc88b 100644
+index 5bd3dc5..f016f14 100644
 --- a/src/ui/CMakeLists.txt
 +++ b/src/ui/CMakeLists.txt
-@@ -135,6 +135,9 @@ if(TARGET amd_fidelityfx_dx12)
+@@ -129,12 +129,17 @@ if(TARGET amd_fidelityfx_vk)
+     target_link_libraries(rexui PRIVATE amd_fidelityfx_vk)
+     set(REXUI_HAS_FIDELITYFX_RUNTIME ON)
+ endif()
+-if(TARGET amd_fidelityfx_dx12)
++# With both renderers the D3D12 presenter loads its FidelityFX runtime at run time instead, and
++# linking both would clash on the ffx* exports.
++if(TARGET amd_fidelityfx_dx12 AND NOT TARGET amd_fidelityfx_vk)
+     target_link_libraries(rexui PRIVATE amd_fidelityfx_dx12)
+     set(REXUI_HAS_FIDELITYFX_RUNTIME ON)
  endif()
  if(REXUI_HAS_FIDELITYFX_RUNTIME)
      target_compile_definitions(rexui PRIVATE REX_HAS_FIDELITYFX_RUNTIME=1)
@@ -5631,6 +5662,171 @@ index 5bd3dc5..1fbc88b 100644
  endif()
  
  if(REXGLUE_USE_VULKAN)
+diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
+index 306118e..9fb22a6 100644
+--- a/src/ui/d3d12/d3d12_presenter.cpp
++++ b/src/ui/d3d12/d3d12_presenter.cpp
+@@ -13,6 +13,7 @@
+ #include <climits>
+ #include <cmath>
+ #include <memory>
++#include <string_view>
+ #include <utility>
+ 
+ #include <rex/assert.h>
+@@ -24,7 +25,12 @@
+ #include <rex/ui/d3d12/d3d12_util.h>
+ #include <rex/ui/surface_win.h>
+ 
+-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
++// FidelityFX for D3D12 is loaded at run time rather than linked, so it can be a newer SDK than
++// the one the Vulkan presenter is built with: the loader of AMD's FSR SDK 2.x
++// (amd_fidelityfx_loader_dx12.dll) picks FSR 4 on GPUs that support it, FSR 3.1 otherwise.
++// FidelityFX SDK 1.x (amd_fidelityfx_dx12.dll) works too.
++#if defined(REX_HAS_FIDELITYFX_SDK)
++#define REX_HAS_FFX_DX12 1
+ #include <ffx_api/dx12/ffx_api_dx12.h>
+ #include <ffx_api/ffx_api.h>
+ #include <ffx_api/ffx_upscale.h>
+@@ -35,6 +41,43 @@ REXCVAR_DEFINE_BOOL(d3d12_allow_variable_refresh_rate_and_tearing, true, "UI/D3D
+ 
+ namespace rex::ui::d3d12 {
+ 
++#if defined(REX_HAS_FFX_DX12)
++namespace {
++struct FfxDx12Functions {
++  PfnFfxCreateContext create_context;
++  PfnFfxDestroyContext destroy_context;
++  PfnFfxQuery query;
++  PfnFfxDispatch dispatch;
++};
++
++// Null if no FidelityFX D3D12 runtime is next to the executable.
++const FfxDx12Functions* FfxDx12() {
++  static const FfxDx12Functions* functions = []() -> const FfxDx12Functions* {
++    for (const wchar_t* name : {L"amd_fidelityfx_loader_dx12.dll", L"amd_fidelityfx_dx12.dll"}) {
++      HMODULE module = LoadLibraryW(name);
++      if (!module) continue;
++      static FfxDx12Functions loaded;
++      loaded.create_context =
++          reinterpret_cast<PfnFfxCreateContext>(GetProcAddress(module, "ffxCreateContext"));
++      loaded.destroy_context =
++          reinterpret_cast<PfnFfxDestroyContext>(GetProcAddress(module, "ffxDestroyContext"));
++      loaded.query = reinterpret_cast<PfnFfxQuery>(GetProcAddress(module, "ffxQuery"));
++      loaded.dispatch = reinterpret_cast<PfnFfxDispatch>(GetProcAddress(module, "ffxDispatch"));
++      if (loaded.create_context && loaded.destroy_context && loaded.query && loaded.dispatch) {
++        REXLOG_INFO("D3D12Presenter: FidelityFX runtime {}",
++                    name == std::wstring_view(L"amd_fidelityfx_dx12.dll") ? "1.x" : "2.x loader");
++        return &loaded;
++      }
++      FreeLibrary(module);
++    }
++    REXLOG_WARN("D3D12Presenter: no FidelityFX D3D12 runtime found; FSR is unavailable");
++    return nullptr;
++  }();
++  return functions;
++}
++}  // namespace
++#endif
++
+ // Generated with `xb buildshaders`.
+ namespace shaders {
+ #include "ui/shaders/bytecode/d3d12_5_1/guest_output_bilinear_dither_ps.h"
+@@ -58,18 +101,18 @@ D3D12Presenter::~D3D12Presenter() {
+   paint_context_.AwaitSwapChainUsageCompletion();
+   guest_output_resource_refresher_submission_tracker_.Shutdown();
+   ui_submission_tracker_.Shutdown();
+-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
++#if defined(REX_HAS_FFX_DX12)
+   DestroyTemporalUpscalerContext();
+ #endif
+ }
+ 
+-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
++#if defined(REX_HAS_FFX_DX12)
+ void D3D12Presenter::DestroyTemporalUpscalerContext() {
+   if (!temporal_upscaler_context_) {
+     return;
+   }
+   ffxContext* context = reinterpret_cast<ffxContext*>(&temporal_upscaler_context_);
+-  ffxDestroyContext(context, nullptr);
++  FfxDx12()->destroy_context(context, nullptr);
+   temporal_upscaler_context_ = nullptr;
+   temporal_upscaler_max_render_width_ = 0;
+   temporal_upscaler_max_render_height_ = 0;
+@@ -79,6 +122,9 @@ void D3D12Presenter::DestroyTemporalUpscalerContext() {
+ 
+ bool D3D12Presenter::EnsureTemporalUpscalerContext(uint32_t render_width, uint32_t render_height,
+                                                    uint32_t output_width, uint32_t output_height) {
++  if (!FfxDx12()) {
++    return false;
++  }
+   if (!temporal_upscaler_context_ || temporal_upscaler_max_render_width_ != render_width ||
+       temporal_upscaler_max_render_height_ != render_height ||
+       temporal_upscaler_max_output_width_ != output_width ||
+@@ -88,7 +134,7 @@ bool D3D12Presenter::EnsureTemporalUpscalerContext(uint32_t render_width, uint32
+     ffxCreateContextDescUpscale create_desc = {};
+     create_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+     create_desc.header.pNext = nullptr;
+-    create_desc.flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
++    create_desc.flags = FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
+     create_desc.maxRenderSize.width = render_width;
+     create_desc.maxRenderSize.height = render_height;
+     create_desc.maxUpscaleSize.width = output_width;
+@@ -103,7 +149,7 @@ bool D3D12Presenter::EnsureTemporalUpscalerContext(uint32_t render_width, uint32
+     create_desc.header.pNext = &backend_desc.header;
+ 
+     ffxContext* context = reinterpret_cast<ffxContext*>(&temporal_upscaler_context_);
+-    if (ffxCreateContext(context, &create_desc.header, nullptr) != FFX_API_RETURN_OK) {
++    if (FfxDx12()->create_context(context, &create_desc.header, nullptr) != FFX_API_RETURN_OK) {
+       REXLOG_WARN("D3D12Presenter: Failed to create FidelityFX temporal upscaler context");
+       temporal_upscaler_context_ = nullptr;
+       return false;
+@@ -121,7 +167,7 @@ bool D3D12Presenter::EnsureTemporalUpscalerContext(uint32_t render_width, uint32
+     provider_version.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+     provider_version.header.pNext = nullptr;
+     ffxContext* context = reinterpret_cast<ffxContext*>(&temporal_upscaler_context_);
+-    if (ffxQuery(context, &provider_version.header) == FFX_API_RETURN_OK &&
++    if (FfxDx12()->query(context, &provider_version.header) == FFX_API_RETURN_OK &&
+         provider_version.versionName) {
+       REXLOG_INFO("D3D12Presenter: FidelityFX upscaler provider {}", provider_version.versionName);
+     }
+@@ -186,7 +232,7 @@ bool D3D12Presenter::DispatchTemporalUpscaler(ID3D12GraphicsCommandList* command
+   dispatch_desc.flags = 0;
+ 
+   ffxContext* context = reinterpret_cast<ffxContext*>(&temporal_upscaler_context_);
+-  if (ffxDispatch(context, &dispatch_desc.header) != FFX_API_RETURN_OK) {
++  if (FfxDx12()->dispatch(context, &dispatch_desc.header) != FFX_API_RETURN_OK) {
+     return false;
+   }
+ 
+@@ -790,7 +836,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+       D3D12_GPU_DESCRIPTOR_HANDLE view_heap_gpu_start =
+           view_heap->GetGPUDescriptorHandleForHeapStart();
+       bool temporal_effect_selected = false;
+-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
++#if defined(REX_HAS_FFX_DX12)
+       temporal_effect_selected =
+           guest_output_paint_config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr2 ||
+           guest_output_paint_config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr3;
+@@ -807,7 +853,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+         bool is_final_effect = i + 1 >= guest_output_flow.effect_count;
+ 
+         GuestOutputPaintEffect effect = guest_output_flow.effects[i];
+-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
++#if defined(REX_HAS_FFX_DX12)
+         bool use_temporal_upscaler = is_temporal_easu_effect(i);
+ #else
+         bool use_temporal_upscaler = false;
+@@ -855,7 +901,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+           effect_rect_y = 0;
+         }
+ 
+-#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
++#if defined(REX_HAS_FFX_DX12)
+         bool temporal_dispatch_done = false;
+         if (use_temporal_upscaler) {
+           uint32_t effect_input_width = 0, effect_input_height = 0;
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
 index 7360ed9..576664c 100644
 --- a/src/ui/presenter.cpp
@@ -5793,7 +5989,7 @@ index 8197bb4..bf5536a 100644
    for (const QueueFamily& queue_family : device->queue_families_) {
      max_enabled_queues_per_family =
 diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
-index 23645ef..965242b 100644
+index 23645ef..a650f84 100644
 --- a/src/ui/vulkan/vulkan_presenter.cpp
 +++ b/src/ui/vulkan/vulkan_presenter.cpp
 @@ -11,6 +11,7 @@
@@ -5941,6 +6137,15 @@ index 23645ef..965242b 100644
    paint_context_.DestroySwapchainAndVulkanSurface();
  
    // Await completion of the usage of everything before destroying anything
+@@ -274,7 +366,7 @@ bool VulkanPresenter::EnsureTemporalUpscalerContext(uint32_t render_width, uint3
+     ffxCreateContextDescUpscale create_desc = {};
+     create_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+     create_desc.header.pNext = nullptr;
+-    create_desc.flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
++    create_desc.flags = FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
+     create_desc.maxRenderSize.width = render_width;
+     create_desc.maxRenderSize.height = render_height;
+     create_desc.maxUpscaleSize.width = output_width;
 @@ -417,6 +509,578 @@ bool VulkanPresenter::DispatchTemporalUpscaler(VkCommandBuffer command_buffer, V
  }
  #endif

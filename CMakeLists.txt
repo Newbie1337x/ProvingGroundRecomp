@@ -86,7 +86,7 @@ set_target_properties(pg PROPERTIES OUTPUT_NAME ProvingGround)
 target_include_directories(pg PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${REXSDK_DIR}/thirdparty/imgui")
 target_link_libraries(pg PRIVATE pg_recomp rex::runtime SDL3::SDL3)
 if(WIN32)
-    target_link_libraries(pg PRIVATE dbghelp winmm psapi ole32 uuid)
+    target_link_libraries(pg PRIVATE dbghelp winmm psapi ole32 uuid shell32)
 endif()
 # Xenos is loaded dynamically; linking rex::runtime alone does not stage it.
 rexglue_configure_target(pg GPU_PLUGINS xenos)

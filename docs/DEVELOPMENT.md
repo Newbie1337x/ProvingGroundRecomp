@@ -54,7 +54,7 @@ fixes.
 
 Every setting is a cvar: it can go in `pg.toml` next to the executable or on the command line
 (`--name=value`). The launcher and the Insert menu write `game_data_root`,
-`render_resolution`, `upscaler`, `fsr_mode`, `sharpness`, `fullscreen`, `frame_rate_limit`,
+`renderer`, `render_resolution`, `upscaler`, `sharpness`, `fullscreen`, `frame_rate_limit`,
 `swap_post_effect`, `button_prompts`, `show_fps` and `show_launcher`, and keep any other lines
 in the file.
 

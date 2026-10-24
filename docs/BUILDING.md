@@ -33,8 +33,10 @@ Requirements:
 
 Keep the repository in a short path (for example `C:\src\ProvingGroundRecomp`): some SDK
 files have long names. Other options: `-Jobs`, `-CodegenOnly`, `-NoStage`, `-SdkSource` (use
-an existing patched SDK tree), `-NoFidelityFX` (leave out AMD FidelityFX, which the FSR 3
-option needs; Linux builds never include it).
+an existing patched SDK tree), `-NoFidelityFX` (leave out AMD FidelityFX, which the FSR options
+need; Linux builds never include it), `-NoD3D12` (leave out the Direct3D 12 renderer and FSR 4).
+Windows builds download AMD's signed FSR SDK 2.3.0 Direct3D 12 runtime
+(`amd_fidelityfx_loader_dx12.dll`, `amd_fidelityfx_upscaler_dx12.dll`) and check their hashes.
 
 ## Linux
 

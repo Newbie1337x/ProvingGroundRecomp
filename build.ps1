@@ -19,6 +19,8 @@ param(
     # Leave AMD FidelityFX (the FSR 3 upscaler option) out of the renderer. It is built by
     # default, which downloads the FidelityFX SDK.
     [switch]$NoFidelityFX,
+    # Leave out the Direct3D 12 renderer (the one with FSR 4); the game then has Vulkan only.
+    [switch]$NoD3D12,
     # Only generate the code; do not build the game.
     [switch]$CodegenOnly,
     # Skip copying the game and its libraries to out\dist.
@@ -27,6 +29,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $FidelityFX = -not $NoFidelityFX
+$D3D12 = -not $NoD3D12
 $repo = $PSScriptRoot
 $sdkTag = 'v0.10.0'
 $sdkUrl = 'https://github.com/rexglue/rexglue-sdk.git'
@@ -146,9 +149,12 @@ function Configure([string]$Game) {
     $configureArgs = @('-S', $repo, '-B', $build, '-G', 'Ninja',
         "-DCMAKE_BUILD_TYPE=$Configuration", "-DCMAKE_CXX_COMPILER=$clang", "-DCMAKE_C_COMPILER=$clangC",
         "-DCMAKE_MAKE_PROGRAM=$ninja", "-DREXSDK_DIR=$sdk", "-DPG_BUILD_GAME=$Game",
-        '-DREXGLUE_USE_D3D12=OFF', '-DREXGLUE_USE_VULKAN=ON', '-DREXGLUE_BUILD_TESTS=OFF',
+        "-DREXGLUE_USE_D3D12=$(if ($D3D12) { 'ON' } else { 'OFF' })", '-DREXGLUE_USE_VULKAN=ON', '-DREXGLUE_BUILD_TESTS=OFF',
         '-DCMAKE_C_FLAGS=-march=x86-64-v2', '-DCMAKE_CXX_FLAGS=-march=x86-64-v2',
-        "-DREXGLUE_ENABLE_FIDELITYFX=$(if ($FidelityFX) { 'ON' } else { 'OFF' })") + $vulkanArgs
+        "-DREXGLUE_ENABLE_FIDELITYFX=$(if ($FidelityFX) { 'ON' } else { 'OFF' })",
+        # FidelityFX built from source is for the Vulkan presenter; the D3D12 one loads AMD's
+        # runtime DLLs instead (with D3D12 on, "auto" would pick the D3D12 backend).
+        '-DREXGLUE_FIDELITYFX_BACKEND=vk') + $vulkanArgs
     Invoke-Step "configure-$Game" $cmake $configureArgs
 }
 
@@ -172,6 +178,29 @@ $exe = Join-Path $build 'ProvingGround.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw "Build finished but $exe is missing." }
 if ($FidelityFX) {
     Get-ChildItem -LiteralPath $ffxBin -Filter 'amd_fidelityfx_*.dll' | Copy-Item -Destination $build
+}
+if ($FidelityFX -and $D3D12) {
+    # FSR 4 comes only as AMD's signed D3D12 binaries of the FSR SDK 2 (MIT), which the D3D12
+    # presenter loads at run time: fetch them once, checked against known hashes.
+    $ffxDx12 = Join-Path $repo 'out\fidelityfx-dx12-v2.3.0'
+    $ffxDx12Files = @{
+        'amd_fidelityfx_loader_dx12.dll'   = 'e2d85aa05a9bd9ed8b38935fdf5199372cca6f74c12015143bb6f945ee1608aa'
+        'amd_fidelityfx_upscaler_dx12.dll' = 'd0dcccc74a43c44ba435b7a369b456e0970d8a4464e4bd683119b374f2c9fb46'
+    }
+    New-Item -ItemType Directory -Force -Path $ffxDx12 | Out-Null
+    foreach ($name in $ffxDx12Files.Keys) {
+        $file = Join-Path $ffxDx12 $name
+        if (-not (Test-Path -LiteralPath $file)) {
+            $url = "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v2.3.0/Kits/FidelityFX/signedbin/$name"
+            Write-Host "Downloading $name (FidelityFX SDK 2.3.0)"
+            Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing
+        }
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash -ne $ffxDx12Files[$name]) {
+            Remove-Item -LiteralPath $file
+            throw "$name does not match the expected FidelityFX SDK 2.3.0 file"
+        }
+        Copy-Item -LiteralPath $file -Destination $build
+    }
 }
 
 if (-not $NoStage) {
