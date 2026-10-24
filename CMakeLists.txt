@@ -72,11 +72,16 @@ set(PG_SOURCES
     src/pg_folder_picker.cpp
     src/pg_frame_pacing.cpp
     src/pg_input_script.cpp
+    src/pg_launcher_win.cpp
     src/pg_sampler.cpp
     src/pg_timeline_hooks.cpp
     src/pg_ui.cpp
 )
 if(WIN32)
+    # The launcher window draws with Dear ImGui's Win32 and Direct3D 11 backends.
+    list(APPEND PG_SOURCES
+        "${REXSDK_DIR}/thirdparty/imgui/backends/imgui_impl_win32.cpp"
+        "${REXSDK_DIR}/thirdparty/imgui/backends/imgui_impl_dx11.cpp")
     add_executable(pg WIN32 ${PG_SOURCES} res/pg.rc)
 else()
     add_executable(pg ${PG_SOURCES})
@@ -86,7 +91,8 @@ set_target_properties(pg PROPERTIES OUTPUT_NAME ProvingGround)
 target_include_directories(pg PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${REXSDK_DIR}/thirdparty/imgui")
 target_link_libraries(pg PRIVATE pg_recomp rex::runtime SDL3::SDL3)
 if(WIN32)
-    target_link_libraries(pg PRIVATE dbghelp winmm psapi ole32 uuid shell32)
+    target_link_libraries(pg PRIVATE dbghelp winmm psapi ole32 uuid shell32 d3d11 dxgi d3dcompiler
+                          dwmapi)
 endif()
 # Xenos is loaded dynamically; linking rex::runtime alone does not stage it.
 rexglue_configure_target(pg GPU_PLUGINS xenos)

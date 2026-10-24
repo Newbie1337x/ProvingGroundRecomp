@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/launcher.png" width="720" alt="The launcher: game folder, display mode, frame rate, resolution and anti-aliasing">
+  <img src="docs/images/launcher.png" width="720" alt="The launcher: game folder, language, display, monitor, frame rate and graphics settings">
 </p>
 
 ## Features
@@ -33,7 +33,7 @@
    [Releases](../../releases) page and unzip it.
 2. Extract your Xbox 360 disc of Tony Hawk's Proving Ground (an ISO dumped from your own copy)
    to a folder. It must contain `default.xex`.
-3. Start `ProvingGround.exe` (Linux: `ProvingGround`), choose that folder and press **PLAY**.
+3. Start `ProvingGround.exe` (Linux: `ProvingGround`), choose that folder and press **Play**.
 
 See [docs/PLAYING.md](docs/PLAYING.md) for the options, controls, file locations and
 troubleshooting.

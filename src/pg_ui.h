@@ -5,6 +5,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <rex/ui/imgui_dialog.h>
 
@@ -55,6 +56,34 @@ void ConfigureFonts(ImFontAtlas* atlas);
 void ConfigureStyle(ImGuiStyle& style);
 
 }  // namespace ui
+
+// The start-up launcher's own window (Windows), in the style of a GNOME settings window: a
+// header bar with the pages and Play, and the settings in cards below.
+struct LauncherState {
+  char path[1024] = {};
+  GameFolderCheck check;
+  int page = 0;
+  // The graphics card the launcher window runs on, for the Graphics card row.
+  std::string gpu;
+  // The monitors by name, in the order the monitor setting counts them.
+  std::vector<std::string> monitors;
+  // The keyboard setting waiting for a key press, if any.
+  std::string capturing;
+};
+void SetLauncherFolder(LauncherState& state, const std::filesystem::path& folder);
+// Reads the GPU plugin's settings from the settings file so the launcher can show and change
+// them before the plugin is loaded; SaveSettings writes them back.
+void StageSettings(const std::filesystem::path& config_path);
+namespace ui {
+void ConfigureLauncherStyle(ImGuiStyle& style);
+// Draws the launcher over the whole window; true when Play was pressed.
+bool DrawLauncher(LauncherState& state);
+}  // namespace ui
+// Shows the launcher window until Play (returns the game folder) or until it is closed
+// (nullopt), and saves the settings. If the window cannot open, returns the given folder. Windows
+// only.
+std::optional<std::filesystem::path> RunLauncherWindow(const std::filesystem::path& config_path,
+                                                       const std::filesystem::path& folder);
 
 // Start screen: game folder and the main options, then Play.
 class Launcher final : public rex::ui::ImGuiDialog {

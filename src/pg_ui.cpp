@@ -5,9 +5,11 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 #include <imgui.h>
@@ -32,6 +34,11 @@ REXCVAR_DEFINE_STRING(render_resolution, "720p", "Video",
                       "renders at 1440p and is scaled down to the window. Overridden by "
                       "resolution_scale when that is set.")
     .allowed({"720p", "1080p", "1440p", "4k"})
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_STRING(language, "auto", "General",
+                      "Game language: auto (the system's, when the game has it, else English), en, "
+                      "fr, de, it or es")
+    .allowed({"auto", "en", "fr", "de", "it", "es"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(renderer, "vulkan", "Video",
                       "Renderer: vulkan or d3d12 (Windows builds with Direct3D 12). The upscaler "
@@ -58,10 +65,11 @@ constexpr uintmax_t kExpectedXexSize = 10366976;
 constexpr uint64_t kExpectedXexHash = 0xa02344935b47f717ull;
 
 // Settings written to the config file, in this order.
-constexpr std::array<const char*, 12> kSavedSettings = {
-    "game_data_root",   "renderer",         "render_resolution", "upscaler",
-    "d3d12_fsr_version", "sharpness",       "fullscreen",        "frame_rate_limit",
-    "swap_post_effect", "button_prompts",   "show_fps",          "show_launcher",
+constexpr std::array<const char*, 15> kSavedSettings = {
+    "game_data_root",    "renderer",         "render_resolution", "upscaler",
+    "d3d12_fsr_version", "sharpness",        "anisotropic_override", "fullscreen",
+    "monitor",           "frame_rate_limit", "swap_post_effect",  "button_prompts",
+    "language",          "show_fps",         "show_launcher",
 };
 
 std::function<rex::ui::Presenter*()> g_presenter_source;
@@ -103,8 +111,17 @@ bool Fsr4RuntimePresent() {
 #endif
 }
 
-// The GPU plugin registers the cvars of every renderer compiled into it.
-bool D3D12Available() { return rex::cvar::GetFlagInfo("d3d12_bindless") != nullptr; }
+// The GPU plugin registers the cvars of every renderer compiled into it. Before it is loaded (the
+// start-up launcher), the SDK's build says.
+bool D3D12Available() {
+  if (rex::cvar::GetFlagInfo("d3d12_bindless")) return true;
+#if defined(REX_HAS_D3D12) && REX_HAS_D3D12
+  // A loaded plugin registers this one too: then it was built without Direct3D 12.
+  return !rex::cvar::GetFlagInfo("vulkan_readback_resolve");
+#else
+  return false;
+#endif
+}
 
 bool UsingD3D12() { return REXCVAR_GET(renderer) == "d3d12" && D3D12Available(); }
 
@@ -115,17 +132,6 @@ bool FsrEnabled() { return REXCVAR_GET(upscaler) == "fsr" && FsrAvailable(); }
 int32_t RenderResolutionScale() {
   const std::string resolution = REXCVAR_GET(render_resolution);
   return resolution == "4k" ? 3 : resolution == "1440p" || resolution == "1080p" ? 2 : 1;
-}
-
-// The FSR preset that upscales this render height to the screen by about the same ratio.
-const char* FsrPresetName(uint32_t render_height, uint32_t display_height) {
-  const double ratio = double(display_height) / double(render_height);
-  return ratio < 0.95   ? "Supersampling"
-         : ratio < 1.15 ? "Native AA"
-         : ratio < 1.6  ? "Quality"
-         : ratio < 1.85 ? "Balanced"
-         : ratio < 2.5  ? "Performance"
-                        : "Ultra Performance";
 }
 
 // FSR's sharpness parameter: stops of reduction, 0 is the sharpest.
@@ -158,6 +164,72 @@ uint64_t HashFile(const std::filesystem::path& path) {
   return hash;
 }
 
+// Values of the GPU plugin's settings while it is not loaded yet (the start-up launcher): read
+// from the settings file and saved back to it, which the plugin reads when it loads.
+std::unordered_map<std::string, std::string> g_staged;
+
+std::string SettingValue(const char* name, const char* fallback) {
+  if (rex::cvar::GetFlagInfo(name)) return rex::cvar::GetFlagByName(name);
+  const auto it = g_staged.find(name);
+  return it != g_staged.end() ? it->second : fallback;
+}
+
+void SetSetting(const char* name, const std::string& value) {
+  if (rex::cvar::GetFlagInfo(name)) {
+    rex::cvar::SetFlagByName(name, value);
+  } else {
+    g_staged[name] = value;
+  }
+}
+
+// The languages the game was released in, with their Xbox 360 language IDs.
+struct GameLanguage {
+  const char* code;
+  const char* name;
+  uint32_t xbox_id;
+};
+constexpr GameLanguage kGameLanguages[] = {
+    {"en", "English", 1},  {"fr", "Fran\xC3\xA7" "ais", 4}, {"de", "Deutsch", 3},
+    {"it", "Italiano", 6}, {"es", "Espa\xC3\xB1ol", 5},
+};
+
+const char* LanguageName(std::string_view code) {
+  for (const auto& language : kGameLanguages) {
+    if (code == language.code) return language.name;
+  }
+  return "English";
+}
+
+// The system's language when the game has it, else English.
+std::string SystemLanguage() {
+  std::string code;
+#if REX_PLATFORM_WIN32
+  switch (PRIMARYLANGID(GetUserDefaultUILanguage())) {
+    case LANG_FRENCH: code = "fr"; break;
+    case LANG_GERMAN: code = "de"; break;
+    case LANG_ITALIAN: code = "it"; break;
+    case LANG_SPANISH: code = "es"; break;
+  }
+#else
+  for (const char* variable : {"LC_ALL", "LC_MESSAGES", "LANG"}) {
+    const char* value = std::getenv(variable);
+    if (value && *value) {
+      code = std::string(value).substr(0, 2);
+      break;
+    }
+  }
+#endif
+  for (const auto& language : kGameLanguages) {
+    if (code == language.code) return code;
+  }
+  return "en";
+}
+
+// Keyboard play (the SDK's keyboard-as-controller and its keys), saved when changed.
+bool IsKeyboardSetting(std::string_view name) {
+  return name == "mnk_mode" || name.starts_with("keybind_");
+}
+
 bool HasXex(const std::filesystem::path& folder) {
   std::error_code ec;
   return std::filesystem::is_regular_file(folder / "default.xex", ec);
@@ -174,9 +246,13 @@ void SaveSettings(const std::filesystem::path& config_path) {
     while (std::getline(in, line)) {
       const auto key_end = line.find_first_of(" =");
       const std::string key = line.substr(0, key_end);
+      // A setting of the GPU plugin before it is loaded (the start-up launcher) keeps its line
+      // unless the launcher changed it.
       const bool ours = std::find_if(kSavedSettings.begin(), kSavedSettings.end(),
                                      [&](const char* name) { return key == name; }) !=
-                        kSavedSettings.end();
+                            kSavedSettings.end() &&
+                            (rex::cvar::GetFlagInfo(key) || g_staged.contains(key)) ||
+                        (IsKeyboardSetting(key) && rex::cvar::GetFlagInfo(key));
       if (!ours && line.rfind("# Proving Ground settings", 0) != 0) kept.push_back(line);
     }
   }
@@ -188,15 +264,39 @@ void SaveSettings(const std::filesystem::path& config_path) {
   out << "# Proving Ground settings (written by the launcher and the Insert menu)\n";
   for (const char* name : kSavedSettings) {
     const auto* info = rex::cvar::GetFlagInfo(name);
-    if (!info) continue;
+    if (!info) {
+      if (const auto it = g_staged.find(name); it != g_staged.end()) {
+        out << name << " = " << TomlString(it->second) << "\n";
+      }
+      continue;
+    }
     const std::string value = rex::cvar::GetFlagByName(name);
     out << name << " = "
         << (info->type == rex::cvar::FlagType::String ? TomlString(value) : value) << "\n";
+  }
+  for (const auto& entry : rex::cvar::GetRegistry()) {
+    if (!IsKeyboardSetting(entry.name)) continue;
+    const std::string value = entry.getter();
+    if (value == entry.default_value) continue;
+    out << entry.name << " = "
+        << (entry.type == rex::cvar::FlagType::String ? TomlString(value) : value) << "\n";
   }
   for (const auto& line : kept) out << line << "\n";
 }
 
 void ApplyStartupSettings() {
+  // The language the console reports to the game, unless given on the command line.
+  const auto* user_language = rex::cvar::GetFlagInfo("user_language");
+  if (user_language && user_language->source != rex::cvar::Source::kCommandLine) {
+    std::string code = REXCVAR_GET(language);
+    if (code == "auto") code = SystemLanguage();
+    for (const auto& language : kGameLanguages) {
+      if (code == language.code) {
+        rex::cvar::SetFlagByName("user_language", std::to_string(language.xbox_id));
+        REXLOG_INFO("Game language: {}", language.name);
+      }
+    }
+  }
   ApplyFrameRateLimit();
   ApplyUpscaler();
   if (rex::cvar::HasNonDefaultValue("resolution_scale")) return;
@@ -348,9 +448,124 @@ void SectionHeader(const char* text) {
   ImGui::Dummy(ImVec2(0, 4 * g_scale));
 }
 
+// Launcher cards (BeginCard / EndCard): rows are drawn as list rows in a rounded card.
+bool g_card = false;
+bool g_card_first_row = false;
+float g_card_width = 0.0f;
+
+// Launcher colours, after libadwaita's dark style.
+constexpr ImVec4 kCardBg = ImVec4(0.216f, 0.216f, 0.216f, 1.0f);
+constexpr ImU32 kRowLine = IM_COL32(0, 0, 0, 90);
+constexpr ImVec4 kBlue = ImVec4(0.208f, 0.518f, 0.894f, 1.0f);
+constexpr ImVec4 kBlueHover = ImVec4(0.235f, 0.565f, 0.945f, 1.0f);
+constexpr ImVec4 kBlueActive = ImVec4(0.165f, 0.435f, 0.780f, 1.0f);
+constexpr ImVec4 kDimText = ImVec4(1.0f, 1.0f, 1.0f, 0.55f);
+
+// A row of a card: title (and subtitle) on the left, the control on the right, control_width
+// wide (0: the usual width). Returns what the control returns.
+template <typename Fn>
+bool CardRow(const char* title, const char* subtitle, ImVec4 subtitle_color, const char* help,
+             float control_width, Fn&& control) {
+  const float s = g_scale;
+  ImDrawList* draw = ImGui::GetWindowDrawList();
+  const ImVec2 start = ImGui::GetCursorScreenPos();
+  const float width = ImGui::GetContentRegionAvail().x;
+  if (!g_card_first_row) {
+    const float left = ImGui::GetWindowPos().x;
+    draw->AddLine(ImVec2(left, start.y), ImVec2(left + ImGui::GetWindowWidth(), start.y), kRowLine,
+                  1.0f * s);
+  }
+  g_card_first_row = false;
+  const float line = ImGui::GetTextLineHeight();
+  const float small_line = g_small ? g_small->LegacySize : line;
+  const float height = (subtitle ? 64.0f : 52.0f) * s;
+  const float text_height = subtitle ? line + 2 * s + small_line : line;
+  if (control_width <= 0) control_width = std::min(260.0f * s, width * 0.5f);
+
+  ImGui::SetCursorScreenPos(ImVec2(start.x, start.y + (height - text_height) * 0.5f));
+  ImGui::PushTextWrapPos(start.x - ImGui::GetWindowPos().x + width - control_width - 12 * s);
+  ImGui::TextUnformatted(title);
+  if (help && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", help);
+  if (subtitle) {
+    ImGui::SetCursorScreenPos(ImVec2(start.x, start.y + (height - text_height) * 0.5f + line + 2 * s));
+    PushFont(g_small);
+    ImGui::PushStyleColor(ImGuiCol_Text, subtitle_color);
+    ImGui::TextUnformatted(subtitle);
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+  }
+  ImGui::PopTextWrapPos();
+
+  ImGui::SetCursorScreenPos(ImVec2(start.x + width - control_width,
+                                   start.y + (height - ImGui::GetFrameHeight()) * 0.5f));
+  ImGui::SetNextItemWidth(control_width);
+  ImGui::PushID(title);
+  const bool result = control();
+  ImGui::PopID();
+  if (help && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", help);
+
+  // The next row starts right below; a zero-height item keeps the card's size to the row.
+  ImGui::SetCursorScreenPos(ImVec2(start.x, start.y + height - ImGui::GetStyle().ItemSpacing.y));
+  ImGui::Dummy(ImVec2(width, 0));
+  return result;
+}
+
+// A switch as in GNOME settings, right-aligned in the item width.
+bool Switch(const char* id, bool* value) {
+  const float s = g_scale;
+  const ImVec2 size(46 * s, 26 * s);
+  const ImVec2 cursor = ImGui::GetCursorScreenPos();
+  const float frame = ImGui::GetFrameHeight();
+  ImGui::SetCursorScreenPos(
+      ImVec2(cursor.x + ImGui::CalcItemWidth() - size.x, cursor.y + (frame - size.y) * 0.5f));
+  const bool pressed = ImGui::InvisibleButton(id, size);
+  if (pressed) *value = !*value;
+  const ImVec2 p = ImGui::GetItemRectMin();
+  const bool hovered = ImGui::IsItemHovered();
+  ImVec4 track = *value ? (hovered ? kBlueHover : kBlue)
+                        : ImVec4(0.33f, 0.33f, 0.33f, hovered ? 1.0f : 0.9f);
+  ImDrawList* draw = ImGui::GetWindowDrawList();
+  draw->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), ImGui::GetColorU32(track),
+                      size.y * 0.5f);
+  const float radius = size.y * 0.5f - 3 * s;
+  const float knob_x = *value ? p.x + size.x - size.y * 0.5f : p.x + size.y * 0.5f;
+  draw->AddCircleFilled(ImVec2(knob_x, p.y + size.y * 0.5f), radius, IM_COL32(255, 255, 255, 255));
+  return pressed;
+}
+
+void BeginCard(const char* title) {
+  const float s = g_scale;
+  if (title) {
+    PushFont(g_small);
+    ImGui::TextUnformatted(title);
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, 2 * s));
+  }
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, kCardBg);
+  ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12 * s);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14 * s, 0));
+  ImGui::BeginChild(title ? title : "##card", ImVec2(g_card_width, 0),
+                    ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+  // The card's padding and rounding are taken; drop-downs opened in it keep the usual ones.
+  ImGui::PopStyleVar(2);
+  g_card = true;
+  g_card_first_row = true;
+}
+
+void EndCard() {
+  g_card = false;
+  // The card ends where the last row does (each row leaves the cursor at its bottom edge).
+  ImGui::Dummy(ImVec2(0, 0));
+  ImGui::EndChild();
+  ImGui::PopStyleColor();
+  ImGui::Dummy(ImVec2(0, 14 * g_scale));
+}
+
 // Label on the left, control on the right. Returns true when the value changed.
 template <typename Fn>
 bool Row(const char* label, const char* help, Fn&& control) {
+  if (g_card) return CardRow(label, nullptr, kDimText, help, 0.0f, control);
   const float label_width = 190 * g_scale;
   ImGui::AlignTextToFramePadding();
   ImGui::TextUnformatted(label);
@@ -369,10 +584,12 @@ struct Choice {
   const char* label;
 };
 
+// A setting of the GPU plugin shows before the plugin is loaded (the start-up launcher) when it
+// has a fallback: its default.
 bool ComboSetting(const char* label, const char* cvar, const std::vector<Choice>& choices,
-                  const char* help) {
-  if (!rex::cvar::GetFlagInfo(cvar)) return false;
-  const std::string current = rex::cvar::GetFlagByName(cvar);
+                  const char* help, const char* fallback = nullptr) {
+  if (!rex::cvar::GetFlagInfo(cvar) && !fallback) return false;
+  const std::string current = SettingValue(cvar, fallback ? fallback : "");
   const char* preview = current.c_str();
   for (const auto& choice : choices) {
     if (current == choice.value) preview = choice.label;
@@ -383,7 +600,8 @@ bool ComboSetting(const char* label, const char* cvar, const std::vector<Choice>
       for (const auto& choice : choices) {
         const bool selected = current == choice.value;
         if (ImGui::Selectable(choice.label, selected) && !selected) {
-          changed = rex::cvar::SetFlagByName(cvar, choice.value);
+          SetSetting(cvar, choice.value);
+          changed = true;
         }
         if (selected) ImGui::SetItemDefaultFocus();
       }
@@ -397,7 +615,7 @@ bool ToggleSetting(const char* label, const char* cvar, const char* help) {
   if (!rex::cvar::GetFlagInfo(cvar)) return false;
   bool value = rex::cvar::Query<bool>(cvar);
   return Row(label, help, [&] {
-    if (!ImGui::Checkbox("##toggle", &value)) return false;
+    if (!(g_card ? Switch("##toggle", &value) : ImGui::Checkbox("##toggle", &value))) return false;
     return rex::cvar::SetFlagByName(cvar, value ? "true" : "false");
   });
 }
@@ -406,9 +624,16 @@ bool DisplayModeSetting() {
   bool fullscreen = rex::cvar::Query<bool>("fullscreen");
   int mode = fullscreen ? 0 : 1;
   return Row("Display mode", "F11 switches it while playing.", [&] {
-    bool changed = ImGui::RadioButton("Fullscreen", &mode, 0);
-    ImGui::SameLine();
-    changed |= ImGui::RadioButton("Windowed", &mode, 1);
+    bool changed = false;
+    if (g_card) {
+      // A list row holds one control: a drop-down.
+      const char* names[] = {"Fullscreen", "Windowed"};
+      changed = ImGui::Combo("##mode", &mode, names, 2);
+    } else {
+      changed = ImGui::RadioButton("Fullscreen", &mode, 0);
+      ImGui::SameLine();
+      changed |= ImGui::RadioButton("Windowed", &mode, 1);
+    }
     if (changed) rex::cvar::SetFlagByName("fullscreen", mode == 0 ? "true" : "false");
     return changed;
   });
@@ -460,8 +685,7 @@ bool AntiAliasingSetting() {
   if (FsrAvailable()) {
     choices.push_back({"fsr", UsingD3D12() ? "AMD FSR 4 AA" : "AMD FSR 3.1 AA"});
   }
-  const std::string current =
-      FsrEnabled() ? "fsr" : rex::cvar::GetFlagByName("swap_post_effect");
+  const std::string current = FsrEnabled() ? "fsr" : SettingValue("swap_post_effect", "none");
   const char* preview = current.c_str();
   for (const auto& choice : choices) {
     if (current == choice.value) preview = choice.label;
@@ -474,7 +698,7 @@ bool AntiAliasingSetting() {
         if (ImGui::Selectable(choice.label, selected) && !selected) {
           const bool fsr = std::string_view(choice.value) == "fsr";
           rex::cvar::SetFlagByName("upscaler", fsr ? "fsr" : "off");
-          rex::cvar::SetFlagByName("swap_post_effect", fsr ? "none" : choice.value);
+          SetSetting("swap_post_effect", fsr ? "none" : choice.value);
           changed = true;
         }
         if (selected) ImGui::SetItemDefaultFocus();
@@ -504,6 +728,25 @@ std::vector<Choice> FsrVersionChoices() {
   for (size_t i = 0; i < names.size(); ++i) {
     choices.push_back({values[i].c_str(), names[i].c_str()});
   }
+  return choices;
+}
+
+const std::vector<Choice> kTextureFiltering = {
+    {"0", "Off"}, {"2", "2x"}, {"3", "4x"}, {"4", "8x"}, {"5", "16x"},
+};
+constexpr const char* kTextureFilteringHelp =
+    "Anisotropic filtering: keeps the ground and ramps sharp into the distance. 16x costs very "
+    "little on current GPUs.";
+constexpr const char* kLanguageHelp =
+    "The game's text and voices. Automatic uses your system's language when the game has it, "
+    "else English. Applies when the game starts.";
+
+// The language choices, Automatic naming the language it picks.
+std::vector<Choice> LanguageChoices() {
+  static std::string automatic;
+  automatic = std::string("Automatic (") + LanguageName(SystemLanguage()) + ")";
+  std::vector<Choice> choices = {{"auto", automatic.c_str()}};
+  for (const auto& language : kGameLanguages) choices.push_back({language.code, language.name});
   return choices;
 }
 
@@ -543,6 +786,8 @@ bool GraphicsSettings(bool in_game) {
     changed |= ComboSetting("Renderer", "renderer", kRenderers, kRendererHelp);
   }
   changed |= ComboSetting("Internal resolution", "render_resolution", kResolutions, kResolutionHelp);
+  changed |= ComboSetting("Texture filtering", "anisotropic_override", kTextureFiltering,
+                          kTextureFilteringHelp);
   changed |= AntiAliasingSetting();
   const bool fsr = FsrEnabled();
   if (fsr && UsingD3D12() && !rex::cvar::GetFlagByName("d3d12_fsr_versions").empty()) {
@@ -556,22 +801,6 @@ bool GraphicsSettings(bool in_game) {
   changed |= ComboSetting("Button icons", "button_prompts", kButtonPrompts, kButtonPromptsHelp);
   changed |= ToggleSetting("Show FPS counter", "show_fps", nullptr);
 
-  const uint32_t render = 720u * uint32_t(RenderResolutionScale());
-  const uint32_t screen = DisplayHeight();
-  char summary[160];
-  if (fsr) {
-    // The FSR preset that has the same ratio, as PC games name them.
-    std::snprintf(summary, sizeof(summary), "FSR %s: renders at %up, %s to your %up screen.",
-                  FsrPresetName(render, screen), render,
-                  render < screen ? "upscaled" : render > screen ? "downscaled" : "anti-aliased",
-                  screen);
-  } else if (render < screen) {
-    std::snprintf(summary, sizeof(summary), "Renders at %up and is scaled up to your %up screen.",
-                  render, screen);
-  } else {
-    std::snprintf(summary, sizeof(summary), "Renders at %up for your %up screen.", render, screen);
-  }
-  MutedNote(summary);
   if (in_game) {
     MutedNote("Renderer, resolution, anti-aliasing and button icons apply the next "
               "time the game starts.");
@@ -699,7 +928,408 @@ void ConfigureStyle(ImGuiStyle& style) {
 // Called before the fonts and style are built, from the window's height in logical pixels.
 void SetScale(float window_height) { g_scale = std::clamp(window_height / 720.0f, 1.0f, 3.0f); }
 
+void ConfigureLauncherStyle(ImGuiStyle& style) {
+  ConfigureStyle(style);
+  // libadwaita's dark colours, with its blue accent.
+  ImVec4* c = style.Colors;
+  c[ImGuiCol_WindowBg] = ImVec4(0.141f, 0.141f, 0.141f, 1.0f);
+  c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
+  c[ImGuiCol_PopupBg] = ImVec4(0.22f, 0.22f, 0.22f, 1.0f);
+  c[ImGuiCol_Border] = ImVec4(0, 0, 0, 0.35f);
+  c[ImGuiCol_FrameBg] = ImVec4(0.29f, 0.29f, 0.29f, 1.0f);
+  c[ImGuiCol_FrameBgHovered] = ImVec4(0.33f, 0.33f, 0.33f, 1.0f);
+  c[ImGuiCol_FrameBgActive] = ImVec4(0.37f, 0.37f, 0.37f, 1.0f);
+  c[ImGuiCol_Button] = c[ImGuiCol_FrameBg];
+  c[ImGuiCol_ButtonHovered] = c[ImGuiCol_FrameBgHovered];
+  c[ImGuiCol_ButtonActive] = c[ImGuiCol_FrameBgActive];
+  c[ImGuiCol_Header] = ImVec4(1, 1, 1, 0.08f);
+  c[ImGuiCol_HeaderHovered] = ImVec4(1, 1, 1, 0.12f);
+  c[ImGuiCol_HeaderActive] = ImVec4(1, 1, 1, 0.16f);
+  c[ImGuiCol_CheckMark] = kBlue;
+  c[ImGuiCol_SliderGrab] = ImVec4(1, 1, 1, 1);
+  c[ImGuiCol_SliderGrabActive] = ImVec4(0.9f, 0.9f, 0.9f, 1);
+  c[ImGuiCol_NavCursor] = kBlue;
+  c[ImGuiCol_ScrollbarGrab] = ImVec4(1, 1, 1, 0.2f);
+  c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(1, 1, 1, 0.3f);
+  c[ImGuiCol_ScrollbarGrabActive] = ImVec4(1, 1, 1, 0.4f);
+  style.WindowRounding = 0.0f;
+  style.WindowBorderSize = 0.0f;
+  style.ChildBorderSize = 0.0f;
+  style.FrameRounding = 8.0f * g_scale;
+  style.PopupRounding = 10.0f * g_scale;
+}
+
+namespace {
+
+// A header-bar button: flat, a soft fill when hovered or selected.
+bool HeaderButton(const char* label, ImVec2 size, bool selected) {
+  const bool pressed = ImGui::InvisibleButton(label, size);
+  const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+  const float alpha = selected ? 0.10f : ImGui::IsItemHovered() ? 0.06f : 0.0f;
+  if (alpha > 0) {
+    ImGui::GetWindowDrawList()->AddRectFilled(a, b, ImGui::GetColorU32(ImVec4(1, 1, 1, alpha)),
+                                              8 * g_scale);
+  }
+  PushFont(g_small);
+  const ImVec2 text = ImGui::CalcTextSize(label);
+  ImGui::GetWindowDrawList()->AddText(
+      ImVec2(a.x + (size.x - text.x) * 0.5f, a.y + (size.y - text.y) * 0.5f),
+      ImGui::GetColorU32(ImVec4(1, 1, 1, selected ? 1.0f : 0.8f)), label);
+  ImGui::PopFont();
+  return pressed;
+}
+
+void LauncherSettingsPage(LauncherState& state) {
+  const float s = g_scale;
+  BeginCard("Game");
+  const char* status = "Choose the folder with the extracted files of your Xbox 360 disc";
+  ImVec4 status_color = kDimText;
+  switch (state.check.status) {
+    case GameFolderCheck::Status::kEmpty:
+      break;
+    case GameFolderCheck::Status::kMissing:
+      status = "default.xex was not found in this folder";
+      status_color = kErrorColor;
+      break;
+    case GameFolderCheck::Status::kUnknownVersion:
+      status = "Not the version this build was made for; it may not work";
+      status_color = kWarnColor;
+      break;
+    case GameFolderCheck::Status::kOk:
+      status = "Game found and verified";
+      status_color = kOkColor;
+      break;
+  }
+  CardRow("Game folder", status, status_color, nullptr, 120 * s, [&] {
+    if (ImGui::Button("Browse...", ImVec2(-FLT_MIN, 0))) {
+      if (auto picked = PickFolder("Select the Proving Ground game folder")) {
+        SetLauncherFolder(state, *picked);
+      }
+    }
+    return false;
+  });
+  const float path_width = std::min(420.0f * s, ImGui::GetContentRegionAvail().x * 0.72f);
+  CardRow("Path", nullptr, kDimText, nullptr, path_width, [&] {
+    if (ImGui::InputTextWithHint("##path", "Folder with default.xex", state.path,
+                                 sizeof(state.path), ImGuiInputTextFlags_EnterReturnsTrue) ||
+        ImGui::IsItemDeactivatedAfterEdit()) {
+      SetLauncherFolder(state, state.path);
+    }
+    return false;
+  });
+  ComboSetting("Language", "language", LanguageChoices(), kLanguageHelp);
+  ToggleSetting("Show this window at startup", "show_launcher",
+                "Off: the game starts directly. Start with --launcher to see this window again.");
+  EndCard();
+
+  BeginCard("Display");
+  DisplayModeSetting();
+  if (state.monitors.size() > 1) {
+    // The SDK's monitor setting: 0 for the system's main one, else its number.
+    static std::vector<std::string> labels, values;
+    labels.clear();
+    values.clear();
+    for (size_t i = 0; i < state.monitors.size(); ++i) {
+      labels.push_back(std::to_string(i + 1) + ": " + state.monitors[i]);
+      values.push_back(std::to_string(i + 1));
+    }
+    std::vector<Choice> choices = {{"0", "Main monitor"}};
+    for (size_t i = 0; i < labels.size(); ++i) choices.push_back({values[i].c_str(), labels[i].c_str()});
+    ComboSetting("Monitor", "monitor", choices, "The monitor the game opens on.");
+  }
+  ComboSetting("Frame rate", "frame_rate_limit", kFrameRates, kFrameRateHelp);
+  ToggleSetting("Show FPS counter", "show_fps", nullptr);
+  EndCard();
+
+  BeginCard("Graphics");
+  if (!state.gpu.empty()) {
+    CardRow("Graphics card", nullptr, kDimText, nullptr, 0.0f, [&] {
+      ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
+      ImGui::AlignTextToFramePadding();
+      const float width = ImGui::CalcTextSize(state.gpu.c_str()).x;
+      ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::CalcItemWidth() - width));
+      ImGui::TextUnformatted(state.gpu.c_str());
+      ImGui::PopStyleColor();
+      return false;
+    });
+  }
+  if (D3D12Available()) ComboSetting("Renderer", "renderer", kRenderers, kRendererHelp);
+  ComboSetting("Internal resolution", "render_resolution", kResolutions, kResolutionHelp);
+  ComboSetting("Texture filtering", "anisotropic_override", kTextureFiltering,
+               kTextureFilteringHelp, "3");
+  AntiAliasingSetting();
+  if (FsrEnabled()) SharpnessSetting();
+  EndCard();
+}
+
+// The SDK's name for a key, as the keyboard settings take it; empty for keys it has no name for.
+std::string KeyName(ImGuiKey key) {
+  if (key >= ImGuiKey_A && key <= ImGuiKey_Z) return std::string(1, char('A' + (key - ImGuiKey_A)));
+  if (key >= ImGuiKey_0 && key <= ImGuiKey_9) return std::string(1, char('0' + (key - ImGuiKey_0)));
+  if (key >= ImGuiKey_Keypad0 && key <= ImGuiKey_Keypad9) {
+    return "Numpad" + std::string(1, char('0' + (key - ImGuiKey_Keypad0)));
+  }
+  switch (key) {
+    case ImGuiKey_Space: return "Space";
+    case ImGuiKey_Enter: return "Return";
+    case ImGuiKey_KeypadEnter: return "NumpadEnter";
+    case ImGuiKey_Tab: return "Tab";
+    case ImGuiKey_Backspace: return "Backspace";
+    case ImGuiKey_Delete: return "Delete";
+    case ImGuiKey_Insert: return "Insert";
+    case ImGuiKey_Home: return "Home";
+    case ImGuiKey_End: return "End";
+    case ImGuiKey_PageUp: return "PageUp";
+    case ImGuiKey_PageDown: return "PageDown";
+    case ImGuiKey_LeftArrow: return "Left";
+    case ImGuiKey_RightArrow: return "Right";
+    case ImGuiKey_UpArrow: return "Up";
+    case ImGuiKey_DownArrow: return "Down";
+    case ImGuiKey_GraveAccent: return "Backtick";
+    case ImGuiKey_Minus: return "Minus";
+    case ImGuiKey_Equal: return "Plus";
+    case ImGuiKey_Comma: return "Comma";
+    case ImGuiKey_Period: return "Period";
+    case ImGuiKey_Semicolon: return "Semicolon";
+    case ImGuiKey_Slash: return "Slash";
+    case ImGuiKey_Backslash: return "Backslash";
+    case ImGuiKey_LeftBracket: return "LBracket";
+    case ImGuiKey_RightBracket: return "RBracket";
+    case ImGuiKey_Apostrophe: return "Quote";
+    case ImGuiKey_KeypadAdd: return "NumpadPlus";
+    case ImGuiKey_KeypadSubtract: return "NumpadMinus";
+    case ImGuiKey_KeypadMultiply: return "NumpadStar";
+    case ImGuiKey_KeypadDivide: return "NumpadSlash";
+    default: return {};
+  }
+}
+
+// How a key reads on its keycap.
+std::string KeyLabel(std::string_view name) {
+  static const std::pair<std::string_view, std::string_view> kLabels[] = {
+      {"Semicolon", ";"}, {"Quote", "'"},   {"Comma", ","},      {"Period", "."},
+      {"Slash", "/"},     {"Backslash", "\\"}, {"LBracket", "["}, {"RBracket", "]"},
+      {"Backtick", "`"},  {"Minus", "-"},   {"Plus", "="},       {"Return", "Enter"},
+      {"NumpadEnter", "Num Enter"}, {"Control", "Ctrl"}, {"Backspace", "Backspace"}};
+  for (const auto& [key, label] : kLabels) {
+    if (name == key) return std::string(label);
+  }
+  if (name.starts_with("Numpad")) return "Num " + std::string(name.substr(6));
+  return std::string(name);
+}
+
+// A keyboard setting's keys as keycaps, right-aligned in the item width ("Shift+Up" is two
+// keys, alternatives are separated by a slash). Clicking it returns true.
+bool KeyCaps(const char* id, const std::string& binds, bool capturing) {
+  const float s = g_scale;
+  const ImVec2 size(ImGui::CalcItemWidth(), ImGui::GetFrameHeight());
+  const bool pressed = ImGui::InvisibleButton(id, size);
+  const ImVec2 a = ImGui::GetItemRectMin();
+  ImDrawList* draw = ImGui::GetWindowDrawList();
+  if (capturing) {
+    draw->AddRectFilled(a, ImVec2(a.x + size.x, a.y + size.y), ImGui::GetColorU32(kBlue), 8 * s);
+    const char* text = "Press a key (Esc cancels)";
+    const ImVec2 t = ImGui::CalcTextSize(text);
+    draw->AddText(ImVec2(a.x + (size.x - t.x) * 0.5f, a.y + (size.y - t.y) * 0.5f),
+                  IM_COL32(255, 255, 255, 255), text);
+    return pressed;
+  }
+  if (ImGui::IsItemHovered()) {
+    draw->AddRectFilled(a, ImVec2(a.x + size.x, a.y + size.y),
+                        ImGui::GetColorU32(ImVec4(1, 1, 1, 0.06f)), 8 * s);
+  }
+  // Pieces from left to right: keycaps and the "+" and "/" between them.
+  struct Piece {
+    std::string text;
+    bool cap;
+  };
+  std::vector<Piece> pieces;
+  std::string_view rest = binds;
+  while (!rest.empty()) {
+    const size_t comma = rest.find(',');
+    std::string_view alternative = rest.substr(0, comma);
+    rest = comma == std::string_view::npos ? std::string_view() : rest.substr(comma + 1);
+    if (!pieces.empty()) pieces.push_back({"/", false});
+    while (!alternative.empty()) {
+      const size_t plus = alternative.find('+');
+      pieces.push_back({KeyLabel(alternative.substr(0, plus)), true});
+      alternative =
+          plus == std::string_view::npos ? std::string_view() : alternative.substr(plus + 1);
+      if (!alternative.empty()) pieces.push_back({"+", false});
+    }
+  }
+  if (pieces.empty()) pieces.push_back({"None", false});
+  const float pad = 8 * s, gap = 6 * s;
+  float total = -gap;
+  for (const auto& piece : pieces) {
+    total += ImGui::CalcTextSize(piece.text.c_str()).x + (piece.cap ? pad * 2 : 0) + gap;
+  }
+  float x = a.x + size.x - total - pad * 0.5f;
+  const float cap_h = size.y - 6 * s;
+  for (const auto& piece : pieces) {
+    const ImVec2 t = ImGui::CalcTextSize(piece.text.c_str());
+    if (piece.cap) {
+      const ImVec2 top(x, a.y + (size.y - cap_h) * 0.5f);
+      const ImVec2 bottom(x + t.x + pad * 2, top.y + cap_h);
+      draw->AddRectFilled(top, bottom, IM_COL32(74, 74, 74, 255), 6 * s);
+      draw->AddLine(ImVec2(top.x + 4 * s, bottom.y), ImVec2(bottom.x - 4 * s, bottom.y),
+                    IM_COL32(0, 0, 0, 110), 2 * s);
+      draw->AddText(ImVec2(x + pad, a.y + (size.y - t.y) * 0.5f), IM_COL32(255, 255, 255, 255),
+                    piece.text.c_str());
+      x = bottom.x + gap;
+    } else {
+      draw->AddText(ImVec2(x, a.y + (size.y - t.y) * 0.5f), ImGui::GetColorU32(kDimText),
+                    piece.text.c_str());
+      x += t.x + gap;
+    }
+  }
+  return pressed;
+}
+
+void LauncherControlsPage(LauncherState& state) {
+  const float s = g_scale;
+  BeginCard("Controller");
+  ComboSetting("Button icons", "button_prompts", kButtonPrompts, kButtonPromptsHelp);
+  EndCard();
+
+  BeginCard("Keyboard");
+  ToggleSetting("Play with the keyboard", "mnk_mode",
+                "The keyboard works as an Xbox 360 controller with the keys below. Controllers "
+                "keep working.");
+  EndCard();
+  if (!rex::cvar::GetFlagInfo("mnk_mode") || !rex::cvar::Query<bool>("mnk_mode")) {
+    state.capturing.clear();
+    return;
+  }
+
+  // One row per controller button: click, then press the key for it (Escape cancels).
+  BeginCard("Keys");
+  for (const auto& entry : rex::cvar::GetRegistry()) {
+    if (!entry.name.starts_with("keybind_") || entry.name == "keybind_guide") continue;
+    const bool capturing = state.capturing == entry.name;
+    CardRow(entry.description.c_str(), nullptr, kDimText, nullptr, 0.0f, [&] {
+      if (KeyCaps("##keys", entry.getter(), capturing)) {
+        state.capturing = capturing ? "" : entry.name;
+      }
+      return false;
+    });
+    if (!capturing) continue;
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+      state.capturing.clear();
+      continue;
+    }
+    for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END; ++k) {
+      if (!ImGui::IsKeyPressed(ImGuiKey(k), false)) continue;
+      const std::string name = KeyName(ImGuiKey(k));
+      if (name.empty()) continue;
+      rex::cvar::SetFlagByName(entry.name, name);
+      state.capturing.clear();
+      break;
+    }
+  }
+  EndCard();
+  if (ImGui::Button("Restore default keys", ImVec2(0, 0))) {
+    for (const auto& entry : rex::cvar::GetRegistry()) {
+      if (entry.name.starts_with("keybind_")) rex::cvar::SetFlagByName(entry.name, entry.default_value);
+    }
+    state.capturing.clear();
+  }
+  ImGui::Dummy(ImVec2(0, 8 * s));
+}
+
+}  // namespace
+
+bool DrawLauncher(LauncherState& state) {
+  const float s = g_scale;
+  const ImGuiIO& io = ImGui::GetIO();
+  ImGui::SetNextWindowPos(ImVec2(0, 0));
+  ImGui::SetNextWindowSize(io.DisplaySize);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+  ImGui::Begin("##launcher", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
+  ImGui::PopStyleVar();
+
+  // Header bar: the pages in the middle, Play on the right.
+  const float bar = 52 * s;
+  ImDrawList* draw = ImGui::GetWindowDrawList();
+  draw->AddRectFilled(ImVec2(0, 0), ImVec2(io.DisplaySize.x, bar), IM_COL32(48, 48, 48, 255));
+  draw->AddLine(ImVec2(0, bar - 1), ImVec2(io.DisplaySize.x, bar - 1), IM_COL32(0, 0, 0, 120));
+  const char* pages[] = {"Settings", "Controls"};
+  const ImVec2 tab(120 * s, 36 * s);
+  const float tabs_x = (io.DisplaySize.x - tab.x * 2 - 4 * s) * 0.5f;
+  for (int i = 0; i < 2; ++i) {
+    ImGui::SetCursorPos(ImVec2(tabs_x + i * (tab.x + 4 * s), (bar - tab.y) * 0.5f));
+    if (HeaderButton(pages[i], tab, state.page == i)) state.page = i;
+  }
+  const bool can_play = state.check.status == GameFolderCheck::Status::kOk ||
+                        state.check.status == GameFolderCheck::Status::kUnknownVersion;
+  const ImVec2 play(104 * s, 36 * s);
+  ImGui::SetCursorPos(ImVec2(io.DisplaySize.x - play.x - 10 * s, (bar - play.y) * 0.5f));
+  ImGui::BeginDisabled(!can_play);
+  ImGui::PushStyleColor(ImGuiCol_Button, kBlue);
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kBlueHover);
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, kBlueActive);
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+  PushFont(g_small);
+  bool play_pressed = ImGui::Button("Play", play);
+  ImGui::PopFont();
+  ImGui::PopStyleColor(4);
+  ImGui::EndDisabled();
+  if (!can_play && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    ImGui::SetTooltip("Choose the game folder first.");
+  }
+  if (can_play && !io.WantTextInput && state.capturing.empty() &&
+      ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
+    play_pressed = true;
+  }
+
+  // The page, in a centred column that scrolls.
+  ImGui::SetCursorPos(ImVec2(0, bar));
+  ImGui::BeginChild("##page", ImVec2(0, 0), ImGuiChildFlags_None);
+  const float column = std::min(600.0f * s, io.DisplaySize.x - 48 * s);
+  g_card_width = column;
+  ImGui::SetCursorPos(ImVec2((io.DisplaySize.x - column) * 0.5f, 24 * s));
+  ImGui::BeginGroup();
+  if (state.page == 0) {
+    LauncherSettingsPage(state);
+  } else {
+    LauncherControlsPage(state);
+  }
+  ImGui::EndGroup();
+  ImGui::Dummy(ImVec2(0, 8 * s));
+  ImGui::EndChild();
+  ImGui::End();
+  return play_pressed;
+}
+
 }  // namespace ui
+
+void StageSettings(const std::filesystem::path& config_path) {
+  // The plugin's settings in the file, before the plugin registers them: name = 'value'.
+  std::ifstream in(config_path);
+  for (std::string line; std::getline(in, line);) {
+    const auto eq = line.find('=');
+    if (eq == std::string::npos) continue;
+    std::string key = line.substr(0, line.find_first_of(" ="));
+    if (rex::cvar::GetFlagInfo(key) ||
+        std::find_if(kSavedSettings.begin(), kSavedSettings.end(),
+                     [&](const char* name) { return key == name; }) == kSavedSettings.end()) {
+      continue;
+    }
+    std::string value = line.substr(line.find_first_not_of(' ', eq + 1));
+    if (value.size() >= 2 && (value.front() == '\'' || value.front() == '"')) {
+      value = value.substr(1, value.size() - 2);
+    }
+    g_staged[key] = value;
+  }
+}
+
+void SetLauncherFolder(LauncherState& state, const std::filesystem::path& folder) {
+  state.check = CheckGameFolder(folder);
+  const std::filesystem::path shown = state.check.folder.empty() ? folder : state.check.folder;
+  std::snprintf(state.path, sizeof(state.path), "%s", shown.string().c_str());
+}
 
 // --- Launcher ---
 

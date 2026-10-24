@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -62,6 +63,20 @@ class PgApp : public rex::ReXApp {
 
   void OnPreSetup(rex::RuntimeConfig& config) override {
     if (config.gpu_plugin.empty()) config.gpu_plugin = "xenos";
+
+#if REX_PLATFORM_WIN32
+    // The launcher has a window of its own, shown before the renderer is chosen and the game's
+    // window opens.
+    if (LauncherWanted(pg::CheckGameFolder(StartupFolder({})))) {
+      if (!pg::RunLauncherWindow(config_path_, StartupFolder({}))) {
+        REXLOG_INFO("Launcher closed");
+        std::exit(0);
+      }
+      // Again, for the GPU plugin's settings the launcher changed; the plugin reads them below.
+      rex::cvar::LoadConfig(config_path_);
+      launcher_shown_ = true;
+    }
+#endif
 
     // The GPU cvars are registered when the plugin DLL loads, which ReXApp does only after this
     // hook; load it here so the defaults below can be set before the GPU reads them in Setup.
@@ -251,25 +266,13 @@ class PgApp : public rex::ReXApp {
   std::optional<rex::PathConfig> OnFinalizePaths(
       const rex::PathConfig& defaults, std::function<void(rex::PathConfig)> resume) override {
     if (window()) window()->SetTitle("Tony Hawk's Proving Ground");
-    // The config file is loaded after the SDK read game_data_root, so read it again here.
-    std::filesystem::path folder = REXCVAR_GET(game_data_root);
-    if (folder.empty()) folder = defaults.game_data_root;
-    if (folder.empty()) {
-      // A "game" folder next to the executable is found without asking.
-      const auto bundled = rex::filesystem::GetExecutableFolder() / "game";
-      if (pg::CheckGameFolder(bundled).status != pg::GameFolderCheck::Status::kMissing) {
-        folder = bundled;
-      }
-    }
-    const auto* root_info = rex::cvar::GetFlagInfo("game_data_root");
-    const bool from_command_line =
-        root_info && root_info->source == rex::cvar::Source::kCommandLine;
+    const std::filesystem::path folder = StartupFolder(defaults.game_data_root);
     const auto check = pg::CheckGameFolder(folder);
     const bool playable = check.status == pg::GameFolderCheck::Status::kOk ||
                           check.status == pg::GameFolderCheck::Status::kUnknownVersion;
-    // --launcher always shows it; a folder given on the command line skips it otherwise.
-    if (playable && !REXCVAR_GET(launcher) &&
-        (from_command_line || !REXCVAR_GET(show_launcher))) {
+    // After the launcher window, or when no launcher is wanted, the game starts. Without a
+    // launcher window (other systems, or it could not open) the launcher screen shows here.
+    if (playable && (launcher_shown_ || !LauncherWanted(check))) {
       pg::ApplyStartupSettings();
       rex::PathConfig paths = defaults;
       paths.game_data_root = check.folder;
@@ -318,8 +321,36 @@ class PgApp : public rex::ReXApp {
   // The renderer the GPU plugin was started with ("vulkan" or "d3d12").
   std::string renderer_ = "vulkan";
   std::unique_ptr<pg::Launcher> launcher_;
+  // The launcher window was shown and Play pressed.
+  bool launcher_shown_ = false;
   std::unique_ptr<pg::GameMenu> menu_;
   std::unique_ptr<pg::FpsOverlay> fps_overlay_;
 
   void CloseMenu() { menu_.reset(); }
+
+  // The game folder to start with: the saved or given one, or a "game" folder next to the
+  // executable, which is found without asking.
+  static std::filesystem::path StartupFolder(const std::filesystem::path& fallback) {
+    std::filesystem::path folder = REXCVAR_GET(game_data_root);
+    if (folder.empty()) folder = fallback;
+    if (folder.empty()) {
+      const auto bundled = rex::filesystem::GetExecutableFolder() / "game";
+      if (pg::CheckGameFolder(bundled).status != pg::GameFolderCheck::Status::kMissing) {
+        folder = bundled;
+      }
+    }
+    return folder;
+  }
+
+  // --launcher always shows the launcher; otherwise a game folder given on the command line, or
+  // the setting, skips it when the folder holds the game.
+  static bool LauncherWanted(const pg::GameFolderCheck& check) {
+    const bool playable = check.status == pg::GameFolderCheck::Status::kOk ||
+                          check.status == pg::GameFolderCheck::Status::kUnknownVersion;
+    const auto* root_info = rex::cvar::GetFlagInfo("game_data_root");
+    const bool from_command_line =
+        root_info && root_info->source == rex::cvar::Source::kCommandLine;
+    return !playable || REXCVAR_GET(launcher) ||
+           (!from_command_line && REXCVAR_GET(show_launcher));
+  }
 };
