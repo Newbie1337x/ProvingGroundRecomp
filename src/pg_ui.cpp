@@ -91,7 +91,7 @@ bool Fsr3Available() {
 }
 
 // AMD's FSR SDK 2 runtime for Direct3D 12, which the D3D12 presenter loads; it runs FSR 4 on GPUs
-// that support it and FSR 3.1 on others.
+// whose driver supports it and FSR 3.1 on others.
 constexpr const char* kFsr4Runtime = "amd_fidelityfx_loader_dx12.dll";
 
 bool Fsr4RuntimePresent() {
@@ -449,7 +449,8 @@ constexpr const char* kRendererHelp =
 constexpr const char* kUpscalerHelp =
     "How the rendered image is scaled to your screen. AMD FSR upscales and sharpens it, and "
     "smooths edges at your screen's resolution (Native AA).\n\nVulkan uses FSR 3.1. Direct3D 12 "
-    "uses AMD's FSR 4 runtime: FSR 4.1.1 on Radeon RX 7000 and 9000, FSR 3.1 on other GPUs.\n\n"
+    "uses AMD's FSR 4 runtime, which picks the newest FSR your GPU driver supports (FSR 4.1 on "
+    "Radeon RX 9000 and 7000, and on RX 6000 with recent drivers) and falls back to FSR 3.1.\n\n"
     "The game's renderer has no motion vectors or camera jitter to give FSR, so it rebuilds "
     "each frame on its own, without the temporal detail it adds in PC games.";
 std::vector<Choice> UpscalerChoices() {

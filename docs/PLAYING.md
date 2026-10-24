@@ -34,7 +34,8 @@ Press **Insert** in game for the options menu. Renderer, resolution, upscaling,
 anti-aliasing and button icons apply on the next start.
 
 About FSR: FSR 4 exists for Direct3D 12 only. With the Direct3D 12 renderer the game uses AMD's
-FSR 4 runtime, which runs FSR 4.1.1 on Radeon RX 7000 and 9000 cards and FSR 3.1 on other GPUs.
+FSR 4 runtime, which picks the newest FSR the GPU driver supports: FSR 4.1 on Radeon RX 9000
+and 7000 cards (FSR 4.1.2 also ran on an RX 6700 XT with a current driver), FSR 3.1 otherwise.
 The game's renderer has no motion vectors or camera jitter to give FSR, so it rebuilds each
 frame on its own, without the temporal detail it adds in PC games.
 
