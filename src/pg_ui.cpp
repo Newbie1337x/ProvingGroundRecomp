@@ -58,10 +58,10 @@ constexpr uintmax_t kExpectedXexSize = 10366976;
 constexpr uint64_t kExpectedXexHash = 0xa02344935b47f717ull;
 
 // Settings written to the config file, in this order.
-constexpr std::array<const char*, 11> kSavedSettings = {
-    "game_data_root", "renderer",         "render_resolution", "upscaler", "sharpness",
-    "fullscreen",     "frame_rate_limit", "swap_post_effect",  "button_prompts", "show_fps",
-    "show_launcher",
+constexpr std::array<const char*, 12> kSavedSettings = {
+    "game_data_root",   "renderer",         "render_resolution", "upscaler",
+    "d3d12_fsr_version", "sharpness",       "fullscreen",        "frame_rate_limit",
+    "swap_post_effect", "button_prompts",   "show_fps",          "show_launcher",
 };
 
 std::function<rex::ui::Presenter*()> g_presenter_source;
@@ -437,7 +437,14 @@ constexpr const char* kResolutionHelp =
 constexpr const char* kFrameRateHelp =
     "30 FPS keeps the original console pacing with vsync. Higher limits run the game uncapped "
     "up to that rate; cutscenes keep their original speed.";
-constexpr const char* kAntiAliasingHelp = "Post-process anti-aliasing applied to each frame.";
+constexpr const char* kAntiAliasingHelp =
+    "FXAA smooths edges in each frame. AMD FSR AA smooths them and also takes the internal "
+    "resolution to your screen: FSR 3.1 with Vulkan, FSR 4 with Direct3D 12 (the newest FSR your "
+    "GPU driver offers: FSR 4.1 on Radeon RX 9000 and 7000, and on RX 6000 with recent drivers).\n\n"
+    "The game's renderer has no motion vectors or camera jitter to give FSR, so it works on each "
+    "frame on its own, without the temporal detail it adds in PC games.";
+constexpr const char* kFsrVersionHelp =
+    "Which FSR from AMD's runtime to use; Newest is what AMD picks for your GPU.";
 
 const std::vector<Choice> kRenderers = {
     {"vulkan", "Vulkan"},
@@ -446,15 +453,58 @@ const std::vector<Choice> kRenderers = {
 constexpr const char* kRendererHelp =
     "Vulkan is the main renderer and the fastest. Direct3D 12 is there for AMD FSR 4, which AMD "
     "ships for Direct3D 12 only. Changing it restarts the game when you press Play.";
-constexpr const char* kUpscalerHelp =
-    "How the rendered image is scaled to your screen. AMD FSR upscales and sharpens it, and "
-    "smooths edges at your screen's resolution (Native AA).\n\nVulkan uses FSR 3.1. Direct3D 12 "
-    "uses AMD's FSR 4 runtime, which picks the newest FSR your GPU driver supports (FSR 4.1 on "
-    "Radeon RX 9000 and 7000, and on RX 6000 with recent drivers) and falls back to FSR 3.1.\n\n"
-    "The game's renderer has no motion vectors or camera jitter to give FSR, so it rebuilds "
-    "each frame on its own, without the temporal detail it adds in PC games.";
-std::vector<Choice> UpscalerChoices() {
-  return {{"off", "Off (bilinear)"}, {"fsr", UsingD3D12() ? "AMD FSR 4" : "AMD FSR 3.1"}};
+// Anti-aliasing: the game's FXAA, or AMD FSR, which also takes the internal resolution to the
+// screen. Stored as swap_post_effect, and upscaler for FSR.
+bool AntiAliasingSetting() {
+  std::vector<Choice> choices = kAntiAliasing;
+  if (FsrAvailable()) {
+    choices.push_back({"fsr", UsingD3D12() ? "AMD FSR 4 AA" : "AMD FSR 3.1 AA"});
+  }
+  const std::string current =
+      FsrEnabled() ? "fsr" : rex::cvar::GetFlagByName("swap_post_effect");
+  const char* preview = current.c_str();
+  for (const auto& choice : choices) {
+    if (current == choice.value) preview = choice.label;
+  }
+  return Row("Anti-aliasing", kAntiAliasingHelp, [&] {
+    bool changed = false;
+    if (ImGui::BeginCombo("##combo", preview)) {
+      for (const auto& choice : choices) {
+        const bool selected = current == choice.value;
+        if (ImGui::Selectable(choice.label, selected) && !selected) {
+          const bool fsr = std::string_view(choice.value) == "fsr";
+          rex::cvar::SetFlagByName("upscaler", fsr ? "fsr" : "off");
+          rex::cvar::SetFlagByName("swap_post_effect", fsr ? "none" : choice.value);
+          changed = true;
+        }
+        if (selected) ImGui::SetItemDefaultFocus();
+      }
+      ImGui::EndCombo();
+    }
+    return changed;
+  });
+}
+
+// The FSR versions AMD's D3D12 runtime offers on this GPU, as the renderer listed them.
+std::vector<Choice> FsrVersionChoices() {
+  // The choices point into these, which stay as they are until the next call.
+  static std::vector<std::string> names, values;
+  static std::string newest;
+  names.clear();
+  values.clear();
+  std::stringstream list(rex::cvar::GetFlagByName("d3d12_fsr_versions"));
+  for (std::string name; std::getline(list, name, ';');) {
+    if (name.empty()) continue;
+    names.push_back(name);
+    // The setting keeps the version number, which the renderer matches against the name.
+    values.push_back(name.substr(0, name.find_first_not_of("0123456789.")));
+  }
+  newest = names.empty() ? "Newest" : "Newest (" + names.front() + ")";
+  std::vector<Choice> choices = {{"", newest.c_str()}};
+  for (size_t i = 0; i < names.size(); ++i) {
+    choices.push_back({values[i].c_str(), names[i].c_str()});
+  }
+  return choices;
 }
 
 const std::vector<Choice> kButtonPrompts = {
@@ -492,16 +542,17 @@ bool GraphicsSettings(bool in_game) {
   if (D3D12Available()) {
     changed |= ComboSetting("Renderer", "renderer", kRenderers, kRendererHelp);
   }
-  if (FsrAvailable()) {
-    changed |= ComboSetting("Upscaling", "upscaler", UpscalerChoices(), kUpscalerHelp);
-  }
+  changed |= ComboSetting("Internal resolution", "render_resolution", kResolutions, kResolutionHelp);
+  changed |= AntiAliasingSetting();
   const bool fsr = FsrEnabled();
+  if (fsr && UsingD3D12() && !rex::cvar::GetFlagByName("d3d12_fsr_versions").empty()) {
+    changed |= ComboSetting("FSR version", "d3d12_fsr_version", FsrVersionChoices(),
+                            kFsrVersionHelp);
+  }
   if (fsr && SharpnessSetting()) {
     ApplyUpscaler();
     changed = true;
   }
-  changed |= ComboSetting("Internal resolution", "render_resolution", kResolutions, kResolutionHelp);
-  changed |= ComboSetting("Anti-aliasing", "swap_post_effect", kAntiAliasing, kAntiAliasingHelp);
   changed |= ComboSetting("Button icons", "button_prompts", kButtonPrompts, kButtonPromptsHelp);
   changed |= ToggleSetting("Show FPS counter", "show_fps", nullptr);
 
@@ -522,7 +573,7 @@ bool GraphicsSettings(bool in_game) {
   }
   MutedNote(summary);
   if (in_game) {
-    MutedNote("Renderer, resolution, upscaling, anti-aliasing and button icons apply the next "
+    MutedNote("Renderer, resolution, anti-aliasing and button icons apply the next "
               "time the game starts.");
   }
   return changed;

@@ -23,15 +23,15 @@ startup**; start with `--launcher` to bring it back.
 | Display mode | Fullscreen or windowed. **F11** switches while playing. |
 | Frame rate | 30 FPS keeps the original console pacing. 60 and above run the game faster than the console could; cutscenes still play at their original speed. |
 | Renderer | Vulkan (main, fastest) or Direct3D 12 (Windows; the one with FSR 4). Changing it restarts the game when you press **PLAY**. |
-| Upscaling | Off, or AMD FSR (3.1 with Vulkan, 4 with Direct3D 12): it scales the internal resolution to your screen. The menu names the matching FSR preset, e.g. on a 1440p screen 720p is Performance and 1440p is Native AA. |
-| Sharpness | FSR sharpening, applied immediately. Lower it if small text looks uneven. |
 | Internal resolution | What the game renders at. 720p is the original. 1440p and 4K render at 2x and 3x; 1080p renders at 1440p. |
-| Anti-aliasing | Optional FXAA. |
+| Anti-aliasing | Off, FXAA, or AMD FSR AA (FSR 3.1 with Vulkan, FSR 4 with Direct3D 12). FSR AA also takes the internal resolution to your screen; the line under the options names the matching FSR preset. |
+| FSR version | With Direct3D 12 and FSR 4 AA: the FSR versions AMD's runtime offers on your GPU (for example 4.1.2, 3.1.5, 2.3.4). Newest is the default. |
+| Sharpness | With FSR AA: its sharpening, applied immediately. Lower it if small text looks uneven. |
 | Button icons | Automatic, Xbox or PlayStation. See Controls. |
 | Show FPS counter | A small counter in the top-right corner. |
 
-Press **Insert** in game for the options menu. Renderer, resolution, upscaling,
-anti-aliasing and button icons apply on the next start.
+Press **Insert** in game for the options menu. Renderer, resolution,
+anti-aliasing, FSR version and button icons apply on the next start.
 
 About FSR: FSR 4 exists for Direct3D 12 only. With the Direct3D 12 renderer the game uses AMD's
 FSR 4 runtime, which picks the newest FSR the GPU driver supports: FSR 4.1 on Radeon RX 9000
