@@ -38,7 +38,9 @@ bool Relaunch(const std::filesystem::path& game_folder);
 
 // What the launcher found in a candidate game folder.
 struct GameFolderCheck {
-  enum class Status { kEmpty, kMissing, kUnknownVersion, kOk };
+  // kNoData: default.xex is there, but not the rest of the disc (only the executable was
+  // extracted, or the data is in another folder).
+  enum class Status { kEmpty, kMissing, kNoData, kUnknownVersion, kOk };
   Status status = Status::kEmpty;
   // The folder that actually holds default.xex (it may be a subfolder of the chosen one).
   std::filesystem::path folder;

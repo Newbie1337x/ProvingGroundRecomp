@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
 
@@ -262,7 +263,7 @@ std::optional<std::filesystem::path> RunLauncherWindow(const std::filesystem::pa
 
   // Saved on Play and on close, as the old launcher did.
   if (!state.check.folder.empty()) {
-    rex::cvar::SetFlagByName("game_data_root", state.check.folder.string());
+    rex::cvar::SetFlagByName("game_data_root", rex::path_to_utf8(state.check.folder));
   }
   SaveSettings(config_path);
   if (!play) return std::nullopt;

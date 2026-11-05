@@ -17,6 +17,7 @@
 #include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
+#include <rex/string/utf8.h>
 #include <rex/ui/presenter.h>
 
 #if REX_PLATFORM_WIN32
@@ -235,6 +236,28 @@ bool HasXex(const std::filesystem::path& folder) {
   return std::filesystem::is_regular_file(folder / "default.xex", ec);
 }
 
+// The child with the name in any case, as the game looks its files up.
+std::filesystem::path FindChild(const std::filesystem::path& folder, std::string_view name) {
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
+    if (rex::string::utf8_equal_case(rex::path_to_utf8(entry.path().filename()), name)) {
+      return entry.path();
+    }
+  }
+  return {};
+}
+
+// Whether the disc's data was extracted along with default.xex - without it the game crashes
+// reading its first script.
+bool HasGameData(const std::filesystem::path& folder) {
+  std::filesystem::path path = folder;
+  for (std::string_view part : {"DATA", "SCRIPTS", "ENGINE", "engine_params.qb.xen"}) {
+    path = FindChild(path, part);
+    if (path.empty()) return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 void SaveSettings(const std::filesystem::path& config_path) {
@@ -258,7 +281,7 @@ void SaveSettings(const std::filesystem::path& config_path) {
   }
   std::ofstream out(config_path, std::ios::trunc);
   if (!out) {
-    REXLOG_WARN("Could not save settings to {}", config_path.string());
+    REXLOG_WARN("Could not save settings to {}", rex::path_to_utf8(config_path));
     return;
   }
   out << "# Proving Ground settings (written by the launcher and the Insert menu)\n";
@@ -389,6 +412,10 @@ GameFolderCheck CheckGameFolder(const std::filesystem::path& chosen) {
   }
   if (folder.empty()) return check;
   check.folder = folder;
+  if (!HasGameData(folder)) {
+    check.status = GameFolderCheck::Status::kNoData;
+    return check;
+  }
   const auto xex = folder / "default.xex";
   const bool expected = std::filesystem::file_size(xex, ec) == kExpectedXexSize &&
                         HashFile(xex) == kExpectedXexHash;
@@ -991,6 +1018,10 @@ void LauncherSettingsPage(LauncherState& state) {
       status = "default.xex was not found in this folder";
       status_color = kErrorColor;
       break;
+    case GameFolderCheck::Status::kNoData:
+      status = "default.xex is here, but not the DATA folder: extract the whole disc";
+      status_color = kErrorColor;
+      break;
     case GameFolderCheck::Status::kUnknownVersion:
       status = "Not the version this build was made for; it may not work";
       status_color = kWarnColor;
@@ -1013,7 +1044,7 @@ void LauncherSettingsPage(LauncherState& state) {
     if (ImGui::InputTextWithHint("##path", "Folder with default.xex", state.path,
                                  sizeof(state.path), ImGuiInputTextFlags_EnterReturnsTrue) ||
         ImGui::IsItemDeactivatedAfterEdit()) {
-      SetLauncherFolder(state, state.path);
+      SetLauncherFolder(state, rex::to_path(state.path));
     }
     return false;
   });
@@ -1328,7 +1359,7 @@ void StageSettings(const std::filesystem::path& config_path) {
 void SetLauncherFolder(LauncherState& state, const std::filesystem::path& folder) {
   state.check = CheckGameFolder(folder);
   const std::filesystem::path shown = state.check.folder.empty() ? folder : state.check.folder;
-  std::snprintf(state.path, sizeof(state.path), "%s", shown.string().c_str());
+  std::snprintf(state.path, sizeof(state.path), "%s", rex::path_to_utf8(shown).c_str());
 }
 
 // --- Launcher ---
@@ -1344,11 +1375,12 @@ Launcher::Launcher(rex::ui::ImGuiDrawer* drawer, std::filesystem::path config_pa
 }
 
 void Launcher::SetFolder(const std::filesystem::path& folder) {
-  const std::string text = folder.string();
+  const std::string text = rex::path_to_utf8(folder);
   std::snprintf(path_buffer_, sizeof(path_buffer_), "%s", text.c_str());
   check_ = CheckGameFolder(folder);
   if (!check_.folder.empty() && check_.folder != folder) {
-    std::snprintf(path_buffer_, sizeof(path_buffer_), "%s", check_.folder.string().c_str());
+    std::snprintf(path_buffer_, sizeof(path_buffer_), "%s",
+                  rex::path_to_utf8(check_.folder).c_str());
   }
 }
 
@@ -1385,7 +1417,7 @@ void Launcher::OnDraw(ImGuiIO& io) {
                                path_buffer_, sizeof(path_buffer_),
                                ImGuiInputTextFlags_EnterReturnsTrue) ||
       ImGui::IsItemDeactivatedAfterEdit()) {
-    SetFolder(path_buffer_);
+    SetFolder(rex::to_path(path_buffer_));
   }
   ImGui::SameLine();
   if (ImGui::Button("Browse...", ImVec2(browse_width, 0))) {
@@ -1401,6 +1433,12 @@ void Launcher::OnDraw(ImGuiIO& io) {
     case GameFolderCheck::Status::kMissing:
       ImGui::PushStyleColor(ImGuiCol_Text, ui::kErrorColor);
       ImGui::TextWrapped("default.xex was not found in this folder.");
+      break;
+    case GameFolderCheck::Status::kNoData:
+      ImGui::PushStyleColor(ImGuiCol_Text, ui::kErrorColor);
+      ImGui::TextWrapped(
+          "default.xex is here, but not the DATA folder. Extract the whole disc, not only "
+          "default.xex.");
       break;
     case GameFolderCheck::Status::kUnknownVersion:
       ImGui::PushStyleColor(ImGuiCol_Text, ui::kWarnColor);
@@ -1452,7 +1490,7 @@ void Launcher::OnDraw(ImGuiIO& io) {
 
   if (play) {
     started_ = true;
-    rex::cvar::SetFlagByName("game_data_root", check_.folder.string());
+    rex::cvar::SetFlagByName("game_data_root", rex::path_to_utf8(check_.folder));
     SaveSettings(config_path_);
     on_play_(check_.folder);
   }

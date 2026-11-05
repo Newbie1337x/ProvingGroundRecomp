@@ -331,7 +331,8 @@ class PgApp : public rex::ReXApp {
   // The game folder to start with: the saved or given one, or a "game" folder next to the
   // executable, which is found without asking.
   static std::filesystem::path StartupFolder(const std::filesystem::path& fallback) {
-    std::filesystem::path folder = REXCVAR_GET(game_data_root);
+    // Strings are UTF-8, a path from a std::string would be in the ANSI code page.
+    std::filesystem::path folder = rex::to_path(REXCVAR_GET(game_data_root));
     if (folder.empty()) folder = fallback;
     if (folder.empty()) {
       const auto bundled = rex::filesystem::GetExecutableFolder() / "game";
