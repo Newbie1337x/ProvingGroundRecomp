@@ -166,3 +166,29 @@ What the dumps showed:
   one wide, high mesh is the sky dome.
 - **Shader objects carry the path of their effect file** (`c:\nxcommon\data\fxfiles_07\...`),
   which will name the effects in step 2.
+
+## Step 2, first look: the shaders (2026-11-06)
+
+The dump also writes each mesh's shader objects (the ones bound after its last pass) and
+the memory their microcode pointer leads to; `--dump_shaders=<dir>` writes the microcode the
+SDK actually translated, for comparison.
+
+- **A vertex shader object** is type 7: word 6 points at a block that starts with the
+  container word 0x102A1100 and holds the size and section offsets (words 11-16). **A pixel
+  shader object** is type 6, with its pointer in word 8.
+- **The objects name their effects**: each carries the path of the compiled effect file,
+  for example `D_3ChkBox_Pass0_Default`, `D_N_S_4ChkBox_ReducedLOD`,
+  `D_1VertexColorOnly_Default`, `Billboard_Fast_Default`, `WaterCubeRefraction_Default`.
+  One frame of the skatepark uses 69 vertex and 69 pixel shaders.
+- **The microcode the GPU runs is not at the objects' pointers.** The SDK keeps it as
+  little-endian words; byte-swapped, 266 of the SDK's 469 shaders are found in the same memory
+  region (0xE812xxxx-0xE818xxxx), but never at an object's pointer, and the vertex shaders
+  never at all. The Xbox 360 Direct3D binds a vertex shader to the vertex declaration by
+  patching its fetch instructions, so the code the GPU loads is a patched copy.
+
+So the reliable link from a native draw to its shaders is the one the emulator already has:
+the shader the command processor loaded for that draw (its microcode hash, which keys the
+SDK's translated shader cache). That points the next step at the SDK: a native draw that
+runs inside the Vulkan command processor, with its current render targets and the shaders
+it has already translated, but with the mesh's vertex and index data uploaded once per
+buffer instead of tracked through shared memory.

@@ -19,6 +19,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <utility>
 
 #include <fmt/format.h>
 #include <rex/cvar.h>
@@ -151,8 +152,16 @@ void DumpMesh(const uint8_t* base, uint32_t record, uint32_t override_effect) {
   DumpResource(base, "ib", mesh.index_buffer, 32, false);
   DumpBlob(base, "decl", mesh.declaration, 256);
   DumpBlob(base, "effect", mesh.effect, 256);
-  DumpBlob(base, "vs", vs, 256);
-  DumpBlob(base, "ps", ps, 256);
+  for (const auto& [kind, shader] : {std::pair<const char*, uint32_t>{"vs", vs}, {"ps", ps}}) {
+    DumpBlob(base, kind, shader, 1024);
+    // The microcode's address is word 6 of a vertex shader (type 7) and word 8 of a pixel
+    // shader (type 6); dump a generous window after it.
+    if (shader && IsReadable(base + shader, 36)) {
+      const bool pixel = pg::native::LoadBigU32(base, shader) == 6;
+      const uint32_t code = pg::native::LoadBigU32(base, shader + (pixel ? 32 : 24));
+      if (code) DumpBlob(base, (std::string(kind) + "_code").c_str(), code, 8192);
+    }
+  }
 }
 
 void UpdateDump() {
