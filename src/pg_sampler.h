@@ -24,6 +24,8 @@ class PgSampler {
   void WriteReport();
 
  private:
+  // Writes the report as it stands (Linux and Android; the Windows sampler writes once).
+  void Write();
   struct State;
   std::unique_ptr<State> state_;
   std::atomic<bool> active_{false};

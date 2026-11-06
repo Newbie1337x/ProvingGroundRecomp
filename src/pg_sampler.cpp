@@ -1,6 +1,8 @@
 #include "pg_sampler.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <map>
 #include <mutex>
@@ -320,6 +322,294 @@ void PgSampler::WriteReport() {
   std::fclose(file);
   if (symbols) SymCleanup(process);
   REXLOG_INFO("Sampler: report written to {}", state.report_path);
+}
+
+#elif defined(__linux__)
+
+// Linux and Android: a SIGPROF timer on process CPU time interrupts whichever thread is running,
+// and the handler counts its program counter and return address in lock-free tables. This needs
+// no perf events, which Android phones often keep closed even to adb. Addresses are reported as
+// library + offset, for llvm-symbolizer with the unstripped libraries of the same build.
+
+#include <dlfcn.h>
+#include <link.h>
+#include <signal.h>
+#include <sys/syscall.h>
+#include <sys/time.h>
+#include <ucontext.h>
+#include <unistd.h>
+
+#include <chrono>
+#include <fstream>
+
+namespace {
+
+struct Slot {
+  std::atomic<uint64_t> key{0};
+  std::atomic<uint64_t> count{0};
+};
+
+// Open-addressing tables, written only from the signal handler (atomics, no allocation).
+template <size_t N>
+struct CountTable {
+  Slot slots[N];
+  void Add(uint64_t key) {
+    if (!key) return;
+    size_t index = size_t((key * 0x9E3779B97F4A7C15ull) >> 40) & (N - 1);
+    for (size_t probe = 0; probe < 64; ++probe, index = (index + 1) & (N - 1)) {
+      uint64_t existing = slots[index].key.load(std::memory_order_relaxed);
+      if (existing == 0) {
+        if (slots[index].key.compare_exchange_strong(existing, key, std::memory_order_relaxed)) {
+          existing = key;
+        }
+      }
+      if (existing == key) {
+        slots[index].count.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+    }
+  }
+  std::vector<std::pair<uint64_t, uint64_t>> Snapshot() const {
+    std::vector<std::pair<uint64_t, uint64_t>> result;
+    for (const Slot& slot : slots) {
+      uint64_t key = slot.key.load(std::memory_order_relaxed);
+      uint64_t count = slot.count.load(std::memory_order_relaxed);
+      if (key && count) result.emplace_back(key, count);
+    }
+    std::sort(result.begin(), result.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    return result;
+  }
+};
+
+CountTable<1 << 17> g_pcs;
+CountTable<1 << 16> g_callers;
+CountTable<1 << 9> g_threads;
+// Program counter per thread: the thread id above bit 40, the address below.
+CountTable<1 << 18> g_thread_pcs;
+constexpr int kThreadShift = 40;
+constexpr uint64_t kAddressMask = (uint64_t(1) << kThreadShift) - 1;
+std::atomic<bool> g_sampling{false};
+std::atomic<uint64_t> g_samples{0};
+
+void OnProfileSignal(int, siginfo_t*, void* context) {
+  if (!g_sampling.load(std::memory_order_relaxed)) return;
+  const int saved_errno = errno;
+  auto* uc = static_cast<ucontext_t*>(context);
+#if defined(__aarch64__)
+  uint64_t pc = uc->uc_mcontext.pc;
+  uint64_t lr = uc->uc_mcontext.regs[30];
+#elif defined(__x86_64__)
+  uint64_t pc = uint64_t(uc->uc_mcontext.gregs[REG_RIP]);
+  uint64_t lr = 0;
+#else
+  uint64_t pc = 0, lr = 0;
+#endif
+  g_pcs.Add(pc);
+  g_callers.Add(lr);
+  const uint64_t tid = uint64_t(syscall(SYS_gettid));
+  g_threads.Add(tid);
+  g_thread_pcs.Add((tid << kThreadShift) | (pc & kAddressMask));
+  g_samples.fetch_add(1, std::memory_order_relaxed);
+  errno = saved_errno;
+}
+
+struct Module {
+  std::string name;
+  uint64_t base;
+  uint64_t begin;
+  uint64_t end;
+};
+
+std::vector<Module> LoadedModules() {
+  std::vector<Module> modules;
+  dl_iterate_phdr(
+      [](dl_phdr_info* info, size_t, void* data) {
+        auto& out = *static_cast<std::vector<Module>*>(data);
+        uint64_t begin = UINT64_MAX, end = 0;
+        for (int i = 0; i < info->dlpi_phnum; ++i) {
+          const auto& ph = info->dlpi_phdr[i];
+          if (ph.p_type != PT_LOAD) continue;
+          begin = std::min<uint64_t>(begin, info->dlpi_addr + ph.p_vaddr);
+          end = std::max<uint64_t>(end, info->dlpi_addr + ph.p_vaddr + ph.p_memsz);
+        }
+        if (begin < end) {
+          std::string name = info->dlpi_name ? info->dlpi_name : "";
+          size_t slash = name.find_last_of('/');
+          if (slash != std::string::npos) name = name.substr(slash + 1);
+          if (name.empty()) name = "(main)";
+          out.push_back({name, uint64_t(info->dlpi_addr), begin, end});
+        }
+        return 0;
+      },
+      &modules);
+  return modules;
+}
+
+std::string Describe(const std::vector<Module>& modules, uint64_t address) {
+  char buffer[256];
+  for (const Module& module : modules) {
+    if (address >= module.begin && address < module.end) {
+      std::snprintf(buffer, sizeof(buffer), "%s 0x%llx", module.name.c_str(),
+                    static_cast<unsigned long long>(address - module.base));
+      std::string text = buffer;
+      Dl_info info{};
+      if (dladdr(reinterpret_cast<void*>(address), &info) && info.dli_sname) {
+        text += "  ";
+        text += info.dli_sname;
+      }
+      return text;
+    }
+  }
+  std::snprintf(buffer, sizeof(buffer), "? 0x%llx", static_cast<unsigned long long>(address));
+  return buffer;
+}
+
+std::string ThreadNameOf(uint64_t tid) {
+  std::ifstream comm("/proc/self/task/" + std::to_string(tid) + "/comm");
+  std::string name;
+  std::getline(comm, name);
+  return name.empty() ? "(exited)" : name;
+}
+
+}  // namespace
+
+struct PgSampler::State {
+  std::string report_path;
+  uint32_t period_ms;
+  std::atomic<bool> running{true};
+  std::thread writer;
+  std::mutex write_mutex;
+  std::chrono::steady_clock::time_point started;
+  bool armed = false;
+};
+
+PgSampler::PgSampler(std::string report_path, uint32_t period_ms)
+    : state_(std::make_unique<State>()) {
+  state_->report_path = std::move(report_path);
+  state_->period_ms = std::max<uint32_t>(period_ms, 1);
+  state_->started = std::chrono::steady_clock::now();
+
+  struct sigaction action = {};
+  action.sa_sigaction = OnProfileSignal;
+  action.sa_flags = SA_SIGINFO | SA_RESTART;
+  sigemptyset(&action.sa_mask);
+  if (sigaction(SIGPROF, &action, nullptr) != 0) {
+    REXLOG_WARN("Sampler: sigaction(SIGPROF) failed");
+    return;
+  }
+  itimerval timer = {};
+  timer.it_interval.tv_sec = state_->period_ms / 1000;
+  timer.it_interval.tv_usec = (state_->period_ms % 1000) * 1000;
+  timer.it_value = timer.it_interval;
+  if (setitimer(ITIMER_PROF, &timer, nullptr) != 0) {
+    REXLOG_WARN("Sampler: setitimer(ITIMER_PROF) failed");
+    return;
+  }
+  state_->armed = true;
+
+  // The process may be killed at any time (Android), so keep the report on disk up to date.
+  State* state = state_.get();
+  state->writer = std::thread([this, state] {
+    auto next = std::chrono::steady_clock::now();
+    while (state->running.load(std::memory_order_relaxed)) {
+      const bool on = active_.load(std::memory_order_relaxed) && (!gate_ || gate_());
+      g_sampling.store(on, std::memory_order_relaxed);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      if (std::chrono::steady_clock::now() >= next) {
+        next += std::chrono::seconds(10);
+        if (g_samples.load(std::memory_order_relaxed)) Write();
+      }
+    }
+  });
+  REXLOG_INFO("Sampler: SIGPROF every {} ms of CPU time, report in {}", state_->period_ms,
+              state_->report_path);
+}
+
+PgSampler::~PgSampler() {
+  WriteReport();
+}
+
+void PgSampler::WriteReport() {
+  if (!state_ || !state_->armed) return;
+  state_->running.store(false, std::memory_order_relaxed);
+  if (state_->writer.joinable() && state_->writer.get_id() != std::this_thread::get_id()) {
+    state_->writer.join();
+  }
+  g_sampling.store(false, std::memory_order_relaxed);
+  Write();
+}
+
+void PgSampler::Write() {
+  std::lock_guard lock(state_->write_mutex);
+  const uint64_t total = g_samples.load(std::memory_order_relaxed);
+  if (!total) return;
+  const std::vector<Module> modules = LoadedModules();
+  const double seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - state_->started).count();
+  const std::string temp_path = state_->report_path + ".tmp";
+  FILE* file = std::fopen(temp_path.c_str(), "w");
+  if (!file) return;
+  std::fprintf(file, "# pg sampler (SIGPROF, %u ms of CPU time per sample)\n", state_->period_ms);
+  std::fprintf(file, "samples %llu  wall %.1f s  cpu %.2f cores\n",
+               static_cast<unsigned long long>(total), seconds,
+               seconds > 0 ? total * state_->period_ms / 1000.0 / seconds : 0.0);
+  std::fprintf(file, "\n## threads\n");
+  for (const auto& [tid, count] : g_threads.Snapshot()) {
+    std::fprintf(file, "%6.2f%%  %8llu  %s (%llu)\n", 100.0 * count / total,
+                 static_cast<unsigned long long>(count), ThreadNameOf(tid).c_str(),
+                 static_cast<unsigned long long>(tid));
+  }
+  std::fprintf(file, "\n## modules\n");
+  std::map<std::string, uint64_t> by_module;
+  const auto pcs = g_pcs.Snapshot();
+  for (const auto& [pc, count] : pcs) {
+    std::string name = "?";
+    for (const Module& module : modules) {
+      if (pc >= module.begin && pc < module.end) {
+        name = module.name;
+        break;
+      }
+    }
+    by_module[name] += count;
+  }
+  std::vector<std::pair<std::string, uint64_t>> sorted_modules(by_module.begin(), by_module.end());
+  std::sort(sorted_modules.begin(), sorted_modules.end(),
+            [](const auto& a, const auto& b) { return a.second > b.second; });
+  for (const auto& [name, count] : sorted_modules) {
+    std::fprintf(file, "%6.2f%%  %8llu  %s\n", 100.0 * count / total,
+                 static_cast<unsigned long long>(count), name.c_str());
+  }
+  std::fprintf(file, "\n## pc\n");
+  for (size_t i = 0; i < pcs.size() && i < 3000; ++i) {
+    std::fprintf(file, "%llu %s\n", static_cast<unsigned long long>(pcs[i].second),
+                 Describe(modules, pcs[i].first).c_str());
+  }
+  // The busiest threads, each with its own hottest addresses.
+  std::fprintf(file, "\n## pc by thread\n");
+  const auto thread_pcs = g_thread_pcs.Snapshot();
+  const auto threads = g_threads.Snapshot();
+  for (size_t t = 0; t < threads.size() && t < 12; ++t) {
+    const uint64_t tid = threads[t].first;
+    std::fprintf(file, "# %s (%llu): %llu\n", ThreadNameOf(tid).c_str(),
+                 static_cast<unsigned long long>(tid),
+                 static_cast<unsigned long long>(threads[t].second));
+    size_t listed = 0;
+    for (const auto& [key, count] : thread_pcs) {
+      if ((key >> kThreadShift) != tid) continue;
+      std::fprintf(file, "%llu %s\n", static_cast<unsigned long long>(count),
+                   Describe(modules, key & kAddressMask).c_str());
+      if (++listed == 40) break;
+    }
+  }
+  std::fprintf(file, "\n## lr\n");
+  const auto callers = g_callers.Snapshot();
+  for (size_t i = 0; i < callers.size() && i < 1500; ++i) {
+    std::fprintf(file, "%llu %s\n", static_cast<unsigned long long>(callers[i].second),
+                 Describe(modules, callers[i].first).c_str());
+  }
+  std::fclose(file);
+  std::rename(temp_path.c_str(), state_->report_path.c_str());
 }
 
 #else

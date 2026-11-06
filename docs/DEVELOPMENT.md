@@ -66,7 +66,7 @@ in the file.
 | `--user_data_root`, `--cache_root` | Save and cache folders. |
 | `--perf_log_csv=<file>` | Per-frame counters (RelWithDebInfo builds). |
 | `--tracy` | Start the Tracy client (RelWithDebInfo builds; viewer 0.13.1). |
-| `--sample_profile=<file>` | Sampling CPU profile of all threads (Windows). |
+| `--sample_profile=<file>` | Sampling CPU profile of all threads (Windows: stacks; Linux and Android: SIGPROF program counters, rewritten every 10 seconds). |
 | `--timeline_trace=<file>` | CSV of game-thread and GPU-thread wait events. |
 | `--input_record=<file>`, `--input_replay=<file>` | Record or replay controller input. |
 
