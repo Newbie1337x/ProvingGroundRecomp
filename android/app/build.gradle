@@ -1,0 +1,88 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Machine settings come from android/local.properties (not committed; forward slashes):
+//   sdk.dir=C:/Users/you/AppData/Local/Android/Sdk
+//   cmake.dir=C:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake
+//   rexsdk.dir=C:/path/to/patched/rexglue-sdk       (default: ../thirdparty/rexglue-sdk)
+//   pg.cxxDir=C:/pgcxx                              (optional: native build folder)
+def localProps = new Properties()
+def localPropsFile = rootProject.file('local.properties')
+if (localPropsFile.exists()) {
+    localPropsFile.withInputStream { localProps.load(it) }
+}
+def repoDir = rootProject.projectDir.parentFile
+def rexsdkDir = localProps.getProperty('rexsdk.dir') ?: System.getenv('REXSDK_SOURCE') ?:
+        new File(repoDir, 'thirdparty/rexglue-sdk').path
+rexsdkDir = rexsdkDir.replace('\\', '/')
+def sdlJava = "${rexsdkDir}/thirdparty/sdl3/android-project/app/src/main/java"
+
+android {
+    namespace = 'io.github.newbie1337x.provingground'
+    compileSdk = 37
+    ndkVersion = '27.1.12297006'
+
+    defaultConfig {
+        applicationId = 'io.github.newbie1337x.provingground'
+        minSdk = 29
+        targetSdk = 35
+        versionCode = 1
+        versionName = '1.0.1-android-preview'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+        externalNativeBuild {
+            cmake {
+                // Release always: the SDK names RelWithDebInfo/Debug libraries with an rd/d
+                // suffix, which the activity's library names do not expect.
+                arguments "-DREXSDK_DIR=${rexsdkDir}", '-DCMAKE_BUILD_TYPE=Release',
+                        '-DANDROID_STL=c++_shared',
+                        // Android 15+ devices may use 16 KB pages.
+                        '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON',
+                        '-DREXGLUE_USE_D3D12=OFF', '-DREXGLUE_USE_VULKAN=ON',
+                        '-DREXGLUE_BUILD_TESTS=OFF', '-DREXGLUE_ENABLE_FIDELITYFX=OFF'
+                // libmain.so (the game), the runtime it links, and the GPU plugin it loads.
+                targets 'pg', 'rexruntime', 'rexgpu-xenos'
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled = false
+            // Signed with the debug key so the APK can be sideloaded without a keystore.
+            signingConfig = signingConfigs.debug
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file('../../CMakeLists.txt')
+            version = '3.25.0+'
+            if (localProps.getProperty('pg.cxxDir')) {
+                buildStagingDirectory = file(localProps.getProperty('pg.cxxDir'))
+            }
+        }
+    }
+
+    sourceSets {
+        main {
+            // SDL's Java side (SDLActivity and friends) comes from the same SDL tree the
+            // runtime is built from, so the JNI functions match.
+            java.srcDirs += [sdlJava]
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // Extract the libraries to the app's native library folder: the runtime finds the GPU
+            // plugin there by path.
+            useLegacyPackaging = true
+        }
+    }
+
+    lint {
+        abortOnError = false
+    }
+}

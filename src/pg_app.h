@@ -221,6 +221,12 @@ class PgApp : public rex::ReXApp {
                                  : rex::filesystem::GetUserFolder() / "ProvingGroundRecomp";
       if (REXCVAR_GET(cache_root).empty()) paths.cache_root = paths.user_data_root / "cache";
     }
+#if REX_PLATFORM_ANDROID
+    // The APK's library folder is read-only; settings live with the saves (the activity points
+    // XDG_DATA_HOME at Android/data/<package>/files).
+    paths.config_path = paths.user_data_root / "pg.toml";
+    config_path_ = paths.config_path;
+#endif
   }
 
   void OnConfigureFonts(ImFontAtlas* atlas) override {

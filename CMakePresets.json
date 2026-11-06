@@ -23,11 +23,28 @@
         { "name": "relwithdebinfo", "displayName": "RelWithDebInfo (symbols and counters)", "inherits": "base",
           "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" } },
         { "name": "debug", "displayName": "Debug", "inherits": "base",
-          "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } }
+          "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+        {
+            "name": "linux-arm64",
+            "displayName": "Linux ARM64 (cross-compiled with Clang, see docs/PORTING.md)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/linux-arm64.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_FLAGS": "-march=armv8.2-a",
+                "CMAKE_CXX_FLAGS": "-march=armv8.2-a",
+                "REXGLUE_USE_D3D12": "OFF",
+                "REXGLUE_USE_VULKAN": "ON",
+                "REXGLUE_BUILD_TESTS": "OFF",
+                "REXGLUE_ENABLE_FIDELITYFX": "OFF"
+            }
+        }
     ],
     "buildPresets": [
         { "name": "release", "configurePreset": "release", "targets": ["pg"] },
         { "name": "relwithdebinfo", "configurePreset": "relwithdebinfo", "targets": ["pg"] },
-        { "name": "debug", "configurePreset": "debug", "targets": ["pg"] }
+        { "name": "debug", "configurePreset": "debug", "targets": ["pg"] },
+        { "name": "linux-arm64", "configurePreset": "linux-arm64", "targets": ["pg"] }
     ]
 }

@@ -83,10 +83,18 @@ if(WIN32)
         "${REXSDK_DIR}/thirdparty/imgui/backends/imgui_impl_win32.cpp"
         "${REXSDK_DIR}/thirdparty/imgui/backends/imgui_impl_dx11.cpp")
     add_executable(pg WIN32 ${PG_SOURCES} res/pg.rc)
+    set_target_properties(pg PROPERTIES OUTPUT_NAME ProvingGround)
+elseif(ANDROID)
+    # SDL's Java activity loads the game as libmain.so and calls its SDL_main.
+    add_library(pg SHARED ${PG_SOURCES})
+    set_target_properties(pg PROPERTIES OUTPUT_NAME main)
+    target_link_libraries(pg PRIVATE android log)
+    # Android 15+ devices may use 16 KB pages; the APK's libraries must be aligned for them.
+    target_link_options(pg PRIVATE "-Wl,-z,max-page-size=16384")
 else()
     add_executable(pg ${PG_SOURCES})
+    set_target_properties(pg PROPERTIES OUTPUT_NAME ProvingGround)
 endif()
-set_target_properties(pg PROPERTIES OUTPUT_NAME ProvingGround)
 # The SDK's runtime does not export the ImGui include directory to host applications.
 target_include_directories(pg PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${REXSDK_DIR}/thirdparty/imgui")
 target_link_libraries(pg PRIVATE pg_recomp rex::runtime SDL3::SDL3)
