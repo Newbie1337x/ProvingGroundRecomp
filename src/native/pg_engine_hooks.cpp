@@ -280,7 +280,7 @@ void LogVertexCheck() {
   g_vb.frame = frame;
 }
 
-// --native_static_buffers: registers each mesh's vertex data once. A buffer seen with
+// --native_static_buffers: registers each mesh's vertex and index data once. A buffer seen with
 // another size or through another vertex buffer object is registered again, which makes the
 // GPU emulation request it again.
 struct Registered {
@@ -289,21 +289,33 @@ struct Registered {
 };
 std::unordered_map<uint32_t, Registered> g_registered;  // by physical address
 
-void RegisterStaticBuffers(const uint8_t* base, const pg::native::EngineMesh& mesh) {
-  if (!mesh.vertex_buffer) return;
-  const uint32_t data = pg::native::LoadBigU32(base, mesh.vertex_buffer + 24) & ~3u;
-  const uint32_t size =
-      ((pg::native::LoadBigU32(base, mesh.vertex_buffer + 28) >> 2) & 0xFFFFFFu) * 4;
+// Registers one buffer's data (physical address and size) as static.
+void RegisterStaticRange(uint32_t data, uint32_t size, uint32_t buffer_object) {
   // Buffers live in the 0xA0000000 view of physical memory.
   if (data < 0xA0000000u || data >= 0xE0000000u || !size) return;
   const uint32_t physical = data & 0x1FFFFFFFu;
-  std::lock_guard<std::mutex> lock(g_mutex);
-  auto [it, inserted] = g_registered.try_emplace(physical, Registered{size, mesh.vertex_buffer});
+  auto [it, inserted] = g_registered.try_emplace(physical, Registered{size, buffer_object});
   if (!inserted) {
-    if (it->second.size == size && it->second.vertex_buffer == mesh.vertex_buffer) return;
-    it->second = {size, mesh.vertex_buffer};
+    if (it->second.size == size && it->second.vertex_buffer == buffer_object) return;
+    it->second = {size, buffer_object};
   }
   rex::graphics::native_ranges::Register(physical, size);
+}
+
+void RegisterStaticBuffers(const uint8_t* base, const pg::native::EngineMesh& mesh) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (mesh.vertex_buffer) {
+    // Words 24/28: the GPU vertex fetch constant (address | type, size in words << 2 | endian).
+    RegisterStaticRange(
+        pg::native::LoadBigU32(base, mesh.vertex_buffer + 24) & ~3u,
+        ((pg::native::LoadBigU32(base, mesh.vertex_buffer + 28) >> 2) & 0xFFFFFFu) * 4,
+        mesh.vertex_buffer);
+  }
+  if (mesh.index_buffer) {
+    // Words 24/28: data address and size in bytes.
+    RegisterStaticRange(pg::native::LoadBigU32(base, mesh.index_buffer + 24),
+                        pg::native::LoadBigU32(base, mesh.index_buffer + 28), mesh.index_buffer);
+  }
 }
 
 }  // namespace

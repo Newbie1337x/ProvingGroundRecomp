@@ -238,3 +238,25 @@ Skate 3 way: register on load, unregister on unload).
 
 The SDK part is in `patches/rexglue-sdk.patch`; the vertex buffer requests by kind are logged
 with `--vulkan_gpu_timing`.
+
+## Step 4: static index buffers, converted once (2026-11-06)
+
+A sampling profile of the command thread (`--sample_profile`) after step 3 showed two more
+costs on the meshes' path:
+
+- **The registry lookup itself** (about 4% of the thread): a `std::map` search under a lock
+  for every vertex buffer. The command processor now keeps the answers by buffer start
+  (found ones until a range is replaced, missing ones until anything is registered), and the
+  registry looks up a whole buffer by its start first.
+- **The strip restart index.** The game draws its strips with restart index 0x7FFF; Vulkan
+  only restarts on 0xFFFF. So the emulator scanned each mesh's 16-bit indices and wrote a
+  converted copy into a per-frame buffer: about 560 draws and 190 000 indices a heavy frame,
+  every frame. The hook now registers the meshes' index buffers too, and for a registered one
+  the primitive processor converts it once into a buffer kept for the whole run
+  (`RequestPersistentConvertedIndexBuffer`, 16 MB host-visible chunks on Vulkan, up to 8) and
+  reuses it: about 780 reused and 7 scanned a heavy frame afterwards.
+
+Uncapped (`--frame_rate_limit=0`) A/B of `gpu_trust_native_ranges`, which now covers both:
+heavy frames 7.80 ms off, 6.43 ms on (-1.27 ± 0.22 ms, 19 pairs). At the start of this work
+the same frames took about 8.5 ms. The capture at the same point of the route shows the same
+geometry.
