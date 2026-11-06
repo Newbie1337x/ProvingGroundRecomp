@@ -76,6 +76,7 @@ set(PG_SOURCES
     src/pg_sampler.cpp
     src/pg_timeline_hooks.cpp
     src/pg_ui.cpp
+    src/native/pg_d3d_trace.cpp
 )
 if(WIN32)
     # The launcher window draws with Dear ImGui's Win32 and Direct3D 11 backends.
