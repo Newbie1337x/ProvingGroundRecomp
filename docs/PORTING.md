@@ -205,9 +205,10 @@ threads at the end of each frame.
 Measured on the phone after those fixes (top, /proc, SurfaceFlinger timestats): the game's
 main thread, the Vulkan submission thread and the GPU command thread each use a whole core, so
 the port is CPU-bound; the phone reaches 85 °C and caps its fast cores at about 1.9 GHz instead
-of 3.0. At the 60 FPS limit SurfaceFlinger counted about 50 presented frames a second, a fifth of
-them 33 or 50 ms apart. `frame_rate_limit = 30` (the game's original pacing) halves the work per
-second. Profiling with simpleperf needs `security.perf_harden` set to 0 on Android 16 (the app
+of 3.0. SurfaceFlinger counts about 50 presents a second whatever the game does, because the
+presenter shows the last frame again when no new one is ready, so it does not measure the game's
+frame rate; use the in-game counter (`show_fps = true`). `frame_rate_limit = 30` (the game's
+original vsync pacing) did not help: it felt slower and the sound went wrong. Profiling with simpleperf needs `security.perf_harden` set to 0 on Android 16 (the app
 is marked profileable for that).
 
 ### Still missing
