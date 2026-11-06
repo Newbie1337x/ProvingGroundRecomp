@@ -93,6 +93,8 @@ from `logs/pg_*.log` (WSLg, X11; thread ids removed):
 [info] [core] Window closing, shutting down...
 ```
 
+Watching the window (WSLg), the game reached its main menu with full rendering, at about 1 FPS as expected under emulation.
+
 So `default.xex` loads, the recompiled code runs its startup and scripts, the guest kernel,
 audio and input start, and the Xenos command processor draws through Vulkan. No crash and no
 CPU-side errors in two minutes of emulated run time. A second run with the final build
@@ -115,7 +117,7 @@ Vulkan subset may miss features the Xenos renderer uses.
 | CPU code | Builds for `arm64-v8a` with NDK r27 (the same code that runs under qemu on Linux ARM64). |
 | Runtime | Builds for Android with the SDK patch: bionic fixes (no robust mutexes; no `ucontext`, so fibers use a small aarch64 stack switch, tested under qemu), libc++ 18 fixes, the Vulkan surface from SDL's window, settings and logs in the app's folder. |
 | App | `android/`: Gradle project, SDL3's `SDLActivity` (from the SDK's own SDL tree), `arm64-v8a` only, Vulkan 1.1 required, release APK signed with the debug key so it can be sideloaded. |
-| Files | The game folder is read with ordinary paths: `Android/data/io.github.newbie1337x.provingground/files/game` (no permission needed), or `ProvingGroundRecomp/game` at the root of shared storage with "All files access". Document-picker (SAF) URIs are not supported. |
+| Files | The user picks the game folder with the system folder picker. The runtime reads files by path, so the app needs "All files access" and turns the picked folder back into a path (`primary:Games/THPG` is `/storage/emulated/0/Games/THPG`; an SD card `<uuid>:path` is `/storage/<uuid>/path`). Cloud folders are refused. A copy in `Android/data/io.github.newbie1337x.provingground/files/game` is found without any permission. |
 | Controls | A Bluetooth or USB controller through SDL. No touch controls yet. |
 | 16 KB pages | Every library is linked with 16 KB segment alignment (`ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES`, `-z max-page-size=16384`), so it loads on 16 KB-page devices. The runtime's write tracking of guest memory still assumes 4 KB host pages; see the risks. |
 
@@ -150,17 +152,35 @@ whole runtime and game (5 to 30 minutes, depending on the machine).
    then in Additional settings > Developer options enable "USB debugging" and "Install via USB".
 2. Connect the phone and install: `adb install -r app-release.apk`. Without a PC: copy the APK to
    the phone, open it from the file manager and allow installs from that app.
-3. Start "Proving Ground" once. It creates
-   `Android/data/io.github.newbie1337x.provingground/files/game` and shows where the game goes.
-4. Copy the extracted game (the folder with `default.xex`, `DATA` and `Content`, about 7 GB) into
-   that folder: from a PC over USB (the phone in "File transfer" mode), or with
-   `adb push "<game folder>/." /sdcard/Android/data/io.github.newbie1337x.provingground/files/game/`.
-   Or copy it to `ProvingGroundRecomp/game` on the phone's storage and tap "Allow all files access".
-5. Pair a controller and start the app again.
+3. Copy the extracted game (the folder with `default.xex`, `DATA` and `Content`, about 7 GB)
+   anywhere on the phone or its SD card, for example `Games/THPG`: from a PC over USB (the
+   phone in "File transfer" mode), or with
+   `adb push "<game folder>/." /sdcard/Games/THPG/`.
+4. Open "Proving Ground" and tap "Choose game folder". The first time it opens the "All files
+   access" setting: turn it on for Proving Ground and go back. Then the folder picker opens:
+   go to the game folder (or the folder that holds it) and tap "Use this folder", then "Allow".
+   The app checks for `default.xex` and `DATA/SCRIPTS/ENGINE/engine_params.qb.xen` (any case),
+   remembers the folder and starts the game.
+5. Next time, "Play" starts it, and "Change game folder" picks another one. Pair a controller
+   before playing.
+
+Without the permission, a copy in `Android/data/io.github.newbie1337x.provingground/files/game`
+also works (the app creates that folder on first start).
 
 Saves, settings (`pg.toml`) and logs are in
 `Android/data/io.github.newbie1337x.provingground/files/ProvingGroundRecomp`; send `logs/` when
-something fails. `adb logcat -s SDL ProvingGround` shows the Java side and native crashes.
+something fails:
+
+```bash
+adb pull /sdcard/Android/data/io.github.newbie1337x.provingground/files/ProvingGroundRecomp/logs
+```
+
+For the Java side and native crashes, clear the log, start the game, then:
+
+```bash
+adb logcat -c
+adb logcat SDL:V ProvingGround:V DEBUG:V AndroidRuntime:E libc:E *:S
+```
 
 ### Still missing
 
