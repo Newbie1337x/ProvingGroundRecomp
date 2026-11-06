@@ -182,6 +182,21 @@ adb logcat -c
 adb logcat SDL:V ProvingGround:V DEBUG:V AndroidRuntime:E libc:E *:S
 ```
 
+### Stutter
+
+The first runs on the Poco F6 played without glitches but stuttered. The log showed why: about
+a thousand pipelines created in the first minutes of play, half of them depth-only pipelines,
+which are always created on the GPU command thread (about 40 ms each on the Adreno 735), and
+the frame end also waits for the pipelines being created on worker threads. There was no
+`VkPipelineCache`, and unlike the PC drivers the Adreno driver keeps no disk cache of its own,
+so every run compiled everything again.
+
+Now the driver cache is saved with the pipeline storage, and the pipelines stored by earlier
+runs are created at startup from it. Expected: the first run after an update still stutters in
+new places; later runs only stutter on content not seen before. Still to do if that is not
+enough: create depth-only pipelines on the worker threads too, and stop waiting for worker
+threads at the end of each frame.
+
 ### Still missing
 
 - A run on a real phone: driver behavior (Adreno), performance, input mapping, going to the
@@ -224,4 +239,5 @@ scripts do not apply it yet):
 | `src/ui/window_sdl.cpp` | Vulkan surface from SDL's `ANativeWindow`. |
 | `src/core/filesystem_posix.cpp` | Executable folder on Android: the APK's native library folder. |
 | `src/ui/rex_app.cpp` | Settings and logs in the user folder on Android. |
+| `src/graphics/vulkan/pipeline_cache.cpp`, `include/rex/graphics/vulkan/pipeline_cache.h`, `include/rex/ui/vulkan/functions/device_1_0.inc` | A persistent `VkPipelineCache` (`cache/shaders/shareable/<title>.vk.pipelinecache`), saved every 10 seconds while pipelines are being added and at shutdown. |
 | New: `include/rex/platform/android.h`, `src/core/platform_android.cpp`, `include/rex/ui/surface_android.h`, `src/ui/surface_android.cpp` | API level, Android setup, content-URI stubs, the `ANativeWindow` surface. |
