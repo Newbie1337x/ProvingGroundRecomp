@@ -202,14 +202,43 @@ new places; later runs only stutter on content not seen before. Still to do if t
 enough: create depth-only pipelines on the worker threads too, and stop waiting for worker
 threads at the end of each frame.
 
-Measured on the phone after those fixes (top, /proc, SurfaceFlinger timestats): the game's
-main thread, the Vulkan submission thread and the GPU command thread each use a whole core, so
-the port is CPU-bound; the phone reaches 85 °C and caps its fast cores at about 1.9 GHz instead
-of 3.0. SurfaceFlinger counts about 50 presents a second whatever the game does, because the
-presenter shows the last frame again when no new one is ready, so it does not measure the game's
-frame rate; use the in-game counter (`show_fps = true`). `frame_rate_limit = 30` (the game's
-original vsync pacing) did not help: it felt slower and the sound went wrong. Profiling with simpleperf needs `security.perf_harden` set to 0 on Android 16 (the app
-is marked profileable for that).
+SurfaceFlinger counts about 50 presents a second whatever the game does, because the presenter
+shows the last frame again when no new one is ready, so it does not measure the game's frame
+rate; use the in-game counter (`show_fps = true`). `frame_rate_limit = 30` (the game's original
+vsync pacing) did not help: it felt slower and the sound went wrong.
+
+### Low frame rate
+
+With the stutter gone, gameplay ran at 10 to 20 FPS (60 in the menus). How it was measured:
+
+- simpleperf can't sample on HyperOS even with `security.perf_harden` at 0, so
+  `--sample_profile` has a SIGPROF implementation on Linux and Android (per-thread program
+  counters, `library 0xoffset` for `llvm-symbolizer` with the unstripped libraries in
+  `android/app/build/intermediates/cxx/Release/*/obj/arm64-v8a/`).
+- `vulkan_gpu_timing = true` in `pg.toml` logs the command thread's CPU time per draw section
+  and the shared memory lock waits every 5 seconds.
+- A Perfetto trace with `sched` events works from adb without root (who wakes whom).
+
+What it showed: the game's main thread mostly spins waiting for its render thread to hand over a
+frame, and the render thread waits for the GPU command thread. That thread spent about 43 ms of
+CPU per heavy frame (1500+ draws), 28 ms of it on vertex buffers, and 20.6 ms of that waiting
+for the global lock. The lock was held by guest threads in the write-watch fault handler,
+which re-checked the page's protection with `QueryProtect`, which on Linux reads all of
+`/proc/self/maps` (thousands of lines here). On Windows that check is one `VirtualQuery`.
+Write faults now skip it (see `src/system/mmio_handler.cpp` below).
+
+| Zone with 1500+ draws | Before | After |
+| --- | --- | --- |
+| Command thread CPU per frame | 43 ms | 25 ms |
+| Shared memory lock waits per frame | 20.6 ms | 1.6 ms |
+| Heavy frame time | 65 to 80 ms | about 50 ms |
+| Average over 5 s | 12 to 18 FPS | 24 to 34 FPS |
+
+Still limiting: the phone throttles hard (CPU at 86 to 90 °C, fast cores held at about 1.6 GHz
+and the prime core at 1.1 GHz, GPU at about 60 °C). The game's own spin-waits (the main loop's
+hand-over wait in `sub_8247E318`, the swap's wait for the next tick in `sub_824853A8`) keep two
+cores busy doing nothing, and four guest worker threads sleep and wake about 2400 times a
+second each.
 
 ### Still missing
 
@@ -255,4 +284,5 @@ scripts do not apply it yet):
 | `src/ui/rex_app.cpp` | Settings and logs in the user folder on Android. |
 | `src/core/timer_queue.cpp` | The timer queue blocks instead of spinning (it woke about 1000 times a second with no timer due); a thread name that fits in 15 characters. |
 | `src/graphics/vulkan/pipeline_cache.cpp`, `include/rex/graphics/vulkan/pipeline_cache.h`, `include/rex/ui/vulkan/functions/device_1_0.inc` | Read the shader and pipeline storage from the start of the file (bionic starts `a+` streams at the end, so every Android run threw the storage away). A persistent `VkPipelineCache` (`cache/shaders/shareable/<title>.vk.pipelinecache`), saved every 10 seconds while pipelines are being added and at shutdown. |
+| `src/system/mmio_handler.cpp` | On Linux, write faults on watched pages no longer re-check the page protection, which parsed `/proc/self/maps` under the global lock (about 20 ms of lock waits per frame on the GPU command thread). Read faults still re-check. |
 | New: `include/rex/platform/android.h`, `src/core/platform_android.cpp`, `include/rex/ui/surface_android.h`, `src/ui/surface_android.cpp` | API level, Android setup, content-URI stubs, the `ANativeWindow` surface. |

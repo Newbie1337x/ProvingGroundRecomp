@@ -711,6 +711,43 @@ index 9dfb39a..aa99cbf 100644
      }
  
      const Shader* shader = nullptr;
+diff --git a/src/system/mmio_handler.cpp b/src/system/mmio_handler.cpp
+index 2b93005..15afdae 100644
+--- a/src/system/mmio_handler.cpp
++++ b/src/system/mmio_handler.cpp
+@@ -406,13 +406,25 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
+     // clears the watch we just hit).
+     // Do this under the lock so we don't introduce another race condition.
+     auto lock = global_critical_region_.Acquire();
+-    memory::PageAccess cur_access;
+-    size_t page_length = memory::page_size();
+-    memory::QueryProtect(fault_host_address, page_length, cur_access);
+-    if (cur_access != memory::PageAccess::kNoAccess &&
+-        (!is_write || cur_access != memory::PageAccess::kReadOnly)) {
+-      // Another thread has cleared this watch. Abort.
+-      return true;
++#if REX_PLATFORM_LINUX
++    // On Linux QueryProtect parses all of /proc/self/maps, thousands of lines, while every
++    // other thread waits for the global lock; with the game writing to watched pages every
++    // frame this held the GPU thread for about 20 ms per frame on Android. A write fault
++    // doesn't need it: under the lock, the callback handles a page that is still watched, and
++    // restores write access to one whose watch another thread has already cleared.
++    const bool recheck_protection = !is_write;
++#else
++    const bool recheck_protection = true;
++#endif
++    if (recheck_protection) {
++      memory::PageAccess cur_access;
++      size_t page_length = memory::page_size();
++      memory::QueryProtect(fault_host_address, page_length, cur_access);
++      if (cur_access != memory::PageAccess::kNoAccess &&
++          (!is_write || cur_access != memory::PageAccess::kReadOnly)) {
++        // Another thread has cleared this watch. Abort.
++        return true;
++      }
+     }
+     // The address is not found within any range, so either a write watch or an
+     // actual access violation.
 diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
 index f016f14..15dc565 100644
 --- a/src/ui/CMakeLists.txt
