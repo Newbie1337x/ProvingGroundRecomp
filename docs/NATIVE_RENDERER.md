@@ -192,3 +192,49 @@ SDK's translated shader cache). That points the next step at the SDK: a native d
 runs inside the Vulkan command processor, with its current render targets and the shaders
 it has already translated, but with the mesh's vertex and index data uploaded once per
 buffer instead of tracked through shared memory.
+
+## Step 3: static mesh data, requested once (2026-11-06)
+
+Before drawing natively, the cheapest piece of the emulated path to replace was the one the
+engine hook can vouch for: the meshes' vertex data.
+
+- **Where the time goes.** `--vulkan_gpu_timing` splits the command processor's CPU time per
+  draw. On heavy frames (1500+ draws) of the skatepark route it spends about 5 ms preparing
+  draws, 1.1-1.3 ms of it on vertex buffers: about 1000 requests a frame, comparing 4.6-5.7 MB
+  of guest memory with the copy on the GPU.
+- **The meshes' vertex data never changes.** `--native_vb_check` hashes the vertex data of
+  every Engine_DrawMesh call and compares it with the previous frame: about 420 buffers
+  (1.3 MB) a frame, none changed along the whole route.
+- **But it sits on "hot" pages.** The SDK stops write-protecting a 4 KB page that the CPU keeps
+  rewriting and compares it on every request instead. The meshes share pages with data the
+  engine rewrites every frame, so about 820 requests a frame for static data paid for that
+  comparison (0.46-0.50 ms), and about 20 more re-uploaded pages that other data had changed
+  (0.15-0.25 ms).
+
+So the SDK now has a registry of static ranges (`rex/graphics/native_ranges.h`, in the
+runtime library so the game can reach it): the game's Engine_DrawMesh hook registers each
+mesh's vertex data the first time it sees it (`--native_static_buffers`, on by default), and
+the Vulkan command processor requests a registered range once per registration and then
+trusts it (`--gpu_trust_native_ranges`, on by default). A buffer seen again with another size
+or through another vertex buffer object is registered again, so it is requested again.
+
+Results on the skatepark route, flipping `gpu_trust_native_ranges` every 30 frames in the
+same run (`--perf_ab_cvar`), command thread work on heavy frames:
+
+| run | off | on | paired difference |
+| --- | --- | --- | --- |
+| 1 | 8.16 ms | 6.52 ms | -1.62 ± 0.32 ms |
+| 2 | 8.22 ms | 6.54 ms | -1.77 ± 0.36 ms |
+
+The vertex buffer section of a heavy frame went from 1.2-1.35 ms to 0.34-0.58 ms (the rest of
+the gain is shared memory work that no longer happens: fewer hot compares, lock waits and
+uploads). Screenshots of the route with and without it show the same geometry.
+
+**The one thing it trusts:** that the engine never puts new vertex data into the same
+buffer object at the same address with the same size. Streaming in new meshes along the route
+did not break that, but a level change has not been tested; `--gpu_trust_native_ranges=false`
+turns it off. Finding the engine's mesh load and unload functions would make it exact (the
+Skate 3 way: register on load, unregister on unload).
+
+The SDK part is in `patches/rexglue-sdk.patch`; the vertex buffer requests by kind are logged
+with `--vulkan_gpu_timing`.

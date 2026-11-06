@@ -2,13 +2,16 @@
 // translating Direct3D, take the engine's draw calls (Engine_DrawMesh, sub_824C4128) and the
 // records they carry, and draw them natively. See docs/NATIVE_RENDERER.md.
 //
-// For now the hook only observes:
+// The hook:
 //   --native_mesh_stats       logs, every 10 s, what the meshes of the last frames use
 //   --native_skip_meshes      skips Engine_DrawMesh, to see on screen what it draws
 //   --native_dump=<file> --native_dump_frame=<n>
 //                             writes every mesh of frame n with its vertex declaration,
 //                             buffers and shaders (<file>.txt index, <file>.bin data), for
 //                             tools/native/mesh_dump.py
+//   --native_vb_check         logs whether the meshes' vertex data changes between frames
+//   --native_static_buffers   (on) registers the meshes' vertex data as static, so the GPU
+//                             emulation requests it once (gpu_trust_native_ranges)
 #include "pg_engine_mesh.h"
 
 #include <algorithm>
@@ -19,10 +22,13 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <fmt/format.h>
 #include <rex/cvar.h>
+#include <rex/graphics/native_ranges.h>
 #include <rex/logging.h>
 #include <rex/ppc.h>
 
@@ -41,6 +47,12 @@ REXCVAR_DEFINE_INT32(native_dump_frame, 1800, "Perf",
 REXCVAR_DEFINE_BOOL(native_skip_meshes, false, "Perf",
                     "Skip the engine's mesh draw function (Engine_DrawMesh), to see what it draws")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(native_vb_check, false, "Perf",
+                    "Log, every 10 seconds, whether the vertex data of the engine's meshes "
+                    "changes between frames");
+REXCVAR_DEFINE_BOOL(native_static_buffers, true, "Perf",
+                    "Tell the GPU emulation that the vertex data of the engine's meshes is "
+                    "static (see rex/graphics/native_ranges.h)");
 
 namespace {
 
@@ -185,6 +197,115 @@ void UpdateDump() {
   }
 }
 
+
+// --native_vb_check: does the vertex data the meshes draw from change between frames?
+struct VertexData {
+  uint32_t size = 0;
+  uint64_t hash = 0;
+  uint64_t frame = 0;  // last frame it was hashed in
+};
+struct VertexCheck {
+  std::unordered_map<uint32_t, VertexData> buffers;
+  std::set<uint32_t> pages;
+  uint64_t frame = 1, frames = 0, draws = 0, hashed = 0, hashed_bytes = 0, changed = 0,
+           changed_bytes = 0, resized = 0;
+  std::map<uint32_t, uint64_t> changed_by_stride;
+  std::vector<uint32_t> changed_samples;
+};
+VertexCheck g_vb;
+
+uint64_t HashBytes(const uint8_t* data, uint32_t size) {
+  uint64_t h = 0xcbf29ce484222325ull;
+  uint32_t i = 0;
+  for (; i + 8 <= size; i += 8) {
+    uint64_t v;
+    std::memcpy(&v, data + i, 8);
+    h = (h ^ v) * 0x100000001b3ull;
+    h ^= h >> 29;
+  }
+  for (; i < size; ++i) h = (h ^ data[i]) * 0x100000001b3ull;
+  return h;
+}
+
+void CheckVertexData(const uint8_t* base, const pg::native::EngineMesh& mesh) {
+  if (!mesh.vertex_buffer || !IsReadable(base + mesh.vertex_buffer, 32)) return;
+  const uint32_t data = pg::native::LoadBigU32(base, mesh.vertex_buffer + 24) & ~3u;
+  const uint32_t size =
+      ((pg::native::LoadBigU32(base, mesh.vertex_buffer + 28) >> 2) & 0xFFFFFFu) * 4;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  ++g_vb.draws;
+  if (!data || !size || size > kMaxBlobBytes) return;
+  VertexData& entry = g_vb.buffers[data];
+  if (entry.frame == g_vb.frame) return;
+  if (!IsReadable(base + data, size)) return;
+  const uint64_t hash = HashBytes(base + data, size);
+  ++g_vb.hashed;
+  g_vb.hashed_bytes += size;
+  for (uint32_t page = data >> 12; page <= (data + size - 1) >> 12; ++page) g_vb.pages.insert(page);
+  if (entry.frame) {
+    if (entry.size != size) {
+      ++g_vb.resized;
+    } else if (entry.hash != hash) {
+      ++g_vb.changed;
+      g_vb.changed_bytes += size;
+      ++g_vb.changed_by_stride[mesh.stride];
+      if (g_vb.changed_samples.size() < 6) g_vb.changed_samples.push_back(data);
+    }
+  }
+  entry = {size, hash, g_vb.frame};
+}
+
+void LogVertexCheck() {
+  ++g_vb.frame;
+  ++g_vb.frames;
+  using Clock = std::chrono::steady_clock;
+  static Clock::time_point last = Clock::now();
+  const auto now = Clock::now();
+  if (now - last < std::chrono::seconds(10)) return;
+  last = now;
+  const double f = double(std::max<uint64_t>(g_vb.frames, 1));
+  std::string samples;
+  for (uint32_t a : g_vb.changed_samples) samples += fmt::format(" {:08X}", a);
+  REXLOG_INFO(
+      "Engine mesh vertex data over {} frames: {:.0f} draws/frame, {:.0f} buffers/frame "
+      "({:.0f} KB, {:.0f} pages of 4 KB in the window); changed from their previous frame: "
+      "{:.1f} buffers/frame ({:.0f} KB), resized {:.1f}; changed by stride{}; samples{}",
+      g_vb.frames, g_vb.draws / f, g_vb.hashed / f, g_vb.hashed_bytes / 1024.0 / f,
+      double(g_vb.pages.size()), g_vb.changed / f, g_vb.changed_bytes / 1024.0 / f,
+      g_vb.resized / f, Histogram(g_vb.changed_by_stride, g_vb.frames), samples);
+  const uint64_t frame = g_vb.frame;
+  std::unordered_map<uint32_t, VertexData> buffers = std::move(g_vb.buffers);
+  g_vb = VertexCheck{};
+  g_vb.buffers = std::move(buffers);
+  g_vb.frame = frame;
+}
+
+// --native_static_buffers: registers each mesh's vertex data once. A buffer seen with
+// another size or through another vertex buffer object is registered again, which makes the
+// GPU emulation request it again.
+struct Registered {
+  uint32_t size;
+  uint32_t vertex_buffer;
+};
+std::unordered_map<uint32_t, Registered> g_registered;  // by physical address
+
+void RegisterStaticBuffers(const uint8_t* base, const pg::native::EngineMesh& mesh) {
+  if (!mesh.vertex_buffer) return;
+  const uint32_t data = pg::native::LoadBigU32(base, mesh.vertex_buffer + 24) & ~3u;
+  const uint32_t size =
+      ((pg::native::LoadBigU32(base, mesh.vertex_buffer + 28) >> 2) & 0xFFFFFFu) * 4;
+  // Buffers live in the 0xA0000000 view of physical memory.
+  if (data < 0xA0000000u || data >= 0xE0000000u || !size) return;
+  const uint32_t physical = data & 0x1FFFFFFFu;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  auto [it, inserted] = g_registered.try_emplace(physical, Registered{size, mesh.vertex_buffer});
+  if (!inserted) {
+    if (it->second.size == size && it->second.vertex_buffer == mesh.vertex_buffer) return;
+    it->second = {size, mesh.vertex_buffer};
+  }
+  rex::graphics::native_ranges::Register(physical, size);
+}
+
 }  // namespace
 
 namespace pg::native {
@@ -193,6 +314,7 @@ void OnSwapForEngineHooks() {
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     UpdateDump();
+    if (REXCVAR_GET(native_vb_check)) LogVertexCheck();
   }
   if (!REXCVAR_GET(native_mesh_stats)) return;
   using Clock = std::chrono::steady_clock;
@@ -227,6 +349,12 @@ extern "C" void sub_824C4128(PPCContext& __restrict ctx, uint8_t* base) {
     Record(pg::native::ReadEngineMesh(base, ctx.r3.u32), skip);
   }
   if (skip) return;
+  if (REXCVAR_GET(native_static_buffers)) {
+    RegisterStaticBuffers(base, pg::native::ReadEngineMesh(base, ctx.r3.u32));
+  }
+  if (REXCVAR_GET(native_vb_check)) {
+    CheckVertexData(base, pg::native::ReadEngineMesh(base, ctx.r3.u32));
+  }
   const uint32_t record = ctx.r3.u32;
   const uint32_t override_effect = ctx.r4.u32;
   __imp__sub_824C4128(ctx, base);
