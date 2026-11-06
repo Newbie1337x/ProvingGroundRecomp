@@ -202,6 +202,14 @@ new places; later runs only stutter on content not seen before. Still to do if t
 enough: create depth-only pipelines on the worker threads too, and stop waiting for worker
 threads at the end of each frame.
 
+Measured on the phone after those fixes (top, /proc, SurfaceFlinger timestats): the game's
+main thread, the Vulkan submission thread and the GPU command thread each use a whole core, so
+the port is CPU-bound; the phone reaches 85 °C and caps its fast cores at about 1.9 GHz instead
+of 3.0. At the 60 FPS limit SurfaceFlinger counted about 50 presented frames a second, a fifth of
+them 33 or 50 ms apart. `frame_rate_limit = 30` (the game's original pacing) halves the work per
+second. Profiling with simpleperf needs `security.perf_harden` set to 0 on Android 16 (the app
+is marked profileable for that).
+
 ### Still missing
 
 - A run on a real phone: driver behavior (Adreno), performance, input mapping, going to the
@@ -244,5 +252,6 @@ scripts do not apply it yet):
 | `src/ui/window_sdl.cpp` | Vulkan surface from SDL's `ANativeWindow`. |
 | `src/core/filesystem_posix.cpp` | Executable folder on Android: the APK's native library folder. |
 | `src/ui/rex_app.cpp` | Settings and logs in the user folder on Android. |
+| `src/core/timer_queue.cpp` | The timer queue blocks instead of spinning (it woke about 1000 times a second with no timer due); a thread name that fits in 15 characters. |
 | `src/graphics/vulkan/pipeline_cache.cpp`, `include/rex/graphics/vulkan/pipeline_cache.h`, `include/rex/ui/vulkan/functions/device_1_0.inc` | Read the shader and pipeline storage from the start of the file (bionic starts `a+` streams at the end, so every Android run threw the storage away). A persistent `VkPipelineCache` (`cache/shaders/shareable/<title>.vk.pipelinecache`), saved every 10 seconds while pipelines are being added and at shutdown. |
 | New: `include/rex/platform/android.h`, `src/core/platform_android.cpp`, `include/rex/ui/surface_android.h`, `src/ui/surface_android.cpp` | API level, Android setup, content-URI stubs, the `ANativeWindow` surface. |

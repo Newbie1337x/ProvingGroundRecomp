@@ -27,6 +27,9 @@
         android:appCategory="game"
         android:isGame="true">
 
+        <!-- Lets simpleperf and Perfetto profile the release build from adb (no debugger). -->
+        <profileable android:shell="true" />
+
         <!-- Checks for the game folder, then starts the game. -->
         <activity
             android:name=".SetupActivity"
