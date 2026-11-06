@@ -142,3 +142,28 @@ emulation out. What it needs, in order:
    of the frame (HUD, outline, post effects) still works. This is the decision that needs
    the SDK side: the Vulkan backend has to expose its current EDRAM render target as a
    Vulkan image for a native pass.
+
+## Step 1: the vertex data, decoded (2026-11-06)
+
+`--native_dump=<file> --native_dump_frame=<n>` writes every mesh `Engine_DrawMesh` draws in
+frame n, with its record, vertex declaration, buffers, effect and the shaders bound after
+the draw; `tools/native/mesh_dump.py` decodes them into an OBJ file and a top-down picture.
+On the skatepark route (frame 2200) the decoded geometry is the street corner on screen:
+the building with the alley, the curved ledge at its base, the curb and the street.
+
+What the dumps showed:
+
+- **Buffers keep their data right after a 32-byte header.** A vertex buffer's words 24/28
+  are its GPU fetch constant (address | 3, and size in words << 2 | endian); an index
+  buffer's are its address and size in bytes. Indices are 16-bit, big-endian, in triangle
+  strips.
+- **A vertex declaration** holds its element count at +24 and its elements from +52, 12
+  bytes each, like `D3DVERTEXELEMENT9`. The world uses about 50 layouts, all with a FLOAT3
+  position followed by a packed normal (type 0x2A2190), binormal and tangent, a D3DCOLOR and
+  one to five HALF2 texture coordinates.
+- **World meshes are already in world space**: no per-mesh transform is needed to draw
+  them. The 11 meshes whose positions are not plain floats are the characters (skinned);
+  one wide, high mesh is the sky dome.
+- **Shader objects carry the path of their effect file** (`c:
+xcommon\dataxfiles_07\...`),
+  which will name the effects in step 2.
