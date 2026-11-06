@@ -71,6 +71,7 @@ set(PG_SOURCES
     src/pg_dev.cpp
     src/pg_folder_picker.cpp
     src/pg_frame_pacing.cpp
+    src/pg_spin_waits.cpp
     src/pg_input_script.cpp
     src/pg_launcher_win.cpp
     src/pg_sampler.cpp

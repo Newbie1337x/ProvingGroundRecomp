@@ -234,11 +234,24 @@ Write faults now skip it (see `src/system/mmio_handler.cpp` below).
 | Heavy frame time | 65 to 80 ms | about 50 ms |
 | Average over 5 s | 12 to 18 FPS | 24 to 34 FPS |
 
-Still limiting: the phone throttles hard (CPU at 86 to 90 °C, fast cores held at about 1.6 GHz
-and the prime core at 1.1 GHz, GPU at about 60 °C). The game's own spin-waits (the main loop's
-hand-over wait in `sub_8247E318`, the swap's wait for the next tick in `sub_824853A8`) keep two
-cores busy doing nothing, and four guest worker threads sleep and wake about 2400 times a
-second each.
+The phone was also hot (CPU at 86 to 90 °C, GPU at about 60 °C) because of three waits that
+never slept:
+
+- The game's main loop spins until the render thread hands over a frame (`sub_8247E318`), and
+  the render thread's swap spins on a game tick that the main thread advances
+  (`sub_824853A8`). `src/pg_spin_waits.cpp` makes both spin for 30 µs and then sleep in 50 µs
+  steps (`sleep_in_spin_waits`, on by default only on Android).
+- The SDK's `WaitMultiple` on POSIX polled its objects every millisecond, which kept the Audio
+  Worker busy and woke it up to 1 ms late. With under a millisecond left it slept 0 ms and
+  spun. Every signal now wakes the threads in `WaitMultiple`.
+
+After both, in the same zones: CPU at 65 to 70 °C after playing, the Audio Worker at a quarter
+of its CPU, about 20% less CPU for the whole game, and averages of 33 to 55 FPS over 5 seconds
+(45 ms for frames with 1500+ draws).
+
+Still limiting: HyperOS holds the fast cores at 1.6 GHz (of 2.8) and the prime core at 1.46 GHz
+(of 3.0) even at 65 °C, so it is a power profile and not only heat; the phone's performance
+mode may lift it. Four guest worker threads also sleep and wake about 2400 times a second each.
 
 ### Still missing
 
@@ -282,6 +295,7 @@ scripts do not apply it yet):
 | `src/ui/window_sdl.cpp` | Vulkan surface from SDL's `ANativeWindow`. |
 | `src/core/filesystem_posix.cpp` | Executable folder on Android: the APK's native library folder. |
 | `src/ui/rex_app.cpp` | Settings and logs in the user folder on Android. |
+| `src/core/threading_posix.cpp` (also) | `WaitMultiple` sleeps until any object is signaled instead of polling every millisecond (and spinning in the last one). |
 | `src/core/timer_queue.cpp` | The timer queue blocks instead of spinning (it woke about 1000 times a second with no timer due); a thread name that fits in 15 characters. |
 | `src/graphics/vulkan/pipeline_cache.cpp`, `include/rex/graphics/vulkan/pipeline_cache.h`, `include/rex/ui/vulkan/functions/device_1_0.inc` | Read the shader and pipeline storage from the start of the file (bionic starts `a+` streams at the end, so every Android run threw the storage away). A persistent `VkPipelineCache` (`cache/shaders/shareable/<title>.vk.pipelinecache`), saved every 10 seconds while pipelines are being added and at shutdown. |
 | `src/system/mmio_handler.cpp` | On Linux, write faults on watched pages no longer re-check the page protection, which parsed `/proc/self/maps` under the global lock (about 20 ms of lock waits per frame on the GPU command thread). Read faults still re-check. |
