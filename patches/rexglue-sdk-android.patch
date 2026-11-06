@@ -427,7 +427,7 @@ index 9ac8d15..629b727 100644
          int result = pthread_mutex_trylock(native_mutex);
          if (result == 0 || result == EOWNERDEAD) {
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
-index 9dfb39a..db3b30c 100644
+index 9dfb39a..aa99cbf 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
 @@ -20,6 +20,7 @@
@@ -448,7 +448,26 @@ index 9dfb39a..db3b30c 100644
    bool edram_fragment_shader_interlock =
        render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
  
-@@ -725,6 +729,7 @@ void VulkanPipelineCache::ShutdownShaderStorage() {
+@@ -429,6 +433,9 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+     return;
+   }
+   pipeline_storage_file_flush_needed_ = false;
++  // Read from the start: for "a+" the initial read position is the end of the file with
++  // bionic's (BSD) stdio, which made every run on Android discard the storage as invalid.
++  rex::filesystem::Seek(pipeline_storage_file_, 0, SEEK_SET);
+   // 'XEPS'.
+   const uint32_t pipeline_storage_magic = 0x53504558;
+   const uint32_t pipeline_storage_magic_api = edram_fragment_shader_interlock ? 1u : 0u;
+@@ -515,6 +522,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+   }
+   ++shader_storage_index_;
+   shader_storage_file_flush_needed_ = false;
++  // As for the pipeline storage: read from the start of the file.
++  rex::filesystem::Seek(shader_storage_file_, 0, SEEK_SET);
+   struct {
+     uint32_t magic;
+     uint32_t version_swapped;
+@@ -725,6 +734,7 @@ void VulkanPipelineCache::ShutdownShaderStorage() {
      rex::thread::Wait(storage_write_thread_.get(), false);
      storage_write_thread_.reset();
    }
@@ -456,7 +475,7 @@ index 9dfb39a..db3b30c 100644
    storage_write_shader_queue_.clear();
    storage_write_pipeline_queue_.clear();
  
-@@ -835,6 +840,12 @@ void VulkanPipelineCache::Shutdown() {
+@@ -835,6 +845,12 @@ void VulkanPipelineCache::Shutdown() {
    }
    pipelines_.clear();
  
@@ -469,7 +488,7 @@ index 9dfb39a..db3b30c 100644
    // Destroy all internal shaders.
    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                           depth_only_fragment_shader_);
-@@ -3486,8 +3497,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3486,8 +3502,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
    VkPipeline pipeline;
@@ -480,7 +499,7 @@ index 9dfb39a..db3b30c 100644
    if (create_result != VK_SUCCESS) {
      uint64_t ps_hash = creation_arguments.pixel_shader
                             ? creation_arguments.pixel_shader->shader().ucode_data_hash()
-@@ -3628,6 +3639,82 @@ void VulkanPipelineCache::ProcessDeferredPipelineDestructions(bool force_all) {
+@@ -3628,6 +3644,82 @@ void VulkanPipelineCache::ProcessDeferredPipelineDestructions(bool force_all) {
    }
  }
  
@@ -563,7 +582,7 @@ index 9dfb39a..db3b30c 100644
  void VulkanPipelineCache::StorageWriteThread() {
    ShaderStoredHeader shader_header;
    // Don't leak anything in unused bits.
-@@ -3649,6 +3736,15 @@ void VulkanPipelineCache::StorageWriteThread() {
+@@ -3649,6 +3741,15 @@ void VulkanPipelineCache::StorageWriteThread() {
        flush_pipelines = false;
        assert_not_null(pipeline_storage_file_);
        fflush(pipeline_storage_file_);

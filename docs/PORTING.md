@@ -191,6 +191,11 @@ the frame end also waits for the pipelines being created on worker threads. Ther
 `VkPipelineCache`, and unlike the PC drivers the Adreno driver keeps no disk cache of its own,
 so every run compiled everything again.
 
+A second cause made it worse: the shader and pipeline storage files are opened in `a+` mode and
+read without seeking first. glibc and the Windows runtime start reading at the beginning, but
+bionic starts at the end, so the header read failed and every run on Android emptied the storage
+instead of preloading it. The storage is now read from the start.
+
 Now the driver cache is saved with the pipeline storage, and the pipelines stored by earlier
 runs are created at startup from it. Expected: the first run after an update still stutters in
 new places; later runs only stutter on content not seen before. Still to do if that is not
@@ -239,5 +244,5 @@ scripts do not apply it yet):
 | `src/ui/window_sdl.cpp` | Vulkan surface from SDL's `ANativeWindow`. |
 | `src/core/filesystem_posix.cpp` | Executable folder on Android: the APK's native library folder. |
 | `src/ui/rex_app.cpp` | Settings and logs in the user folder on Android. |
-| `src/graphics/vulkan/pipeline_cache.cpp`, `include/rex/graphics/vulkan/pipeline_cache.h`, `include/rex/ui/vulkan/functions/device_1_0.inc` | A persistent `VkPipelineCache` (`cache/shaders/shareable/<title>.vk.pipelinecache`), saved every 10 seconds while pipelines are being added and at shutdown. |
+| `src/graphics/vulkan/pipeline_cache.cpp`, `include/rex/graphics/vulkan/pipeline_cache.h`, `include/rex/ui/vulkan/functions/device_1_0.inc` | Read the shader and pipeline storage from the start of the file (bionic starts `a+` streams at the end, so every Android run threw the storage away). A persistent `VkPipelineCache` (`cache/shaders/shareable/<title>.vk.pipelinecache`), saved every 10 seconds while pipelines are being added and at shutdown. |
 | New: `include/rex/platform/android.h`, `src/core/platform_android.cpp`, `include/rex/ui/surface_android.h`, `src/ui/surface_android.cpp` | API level, Android setup, content-URI stubs, the `ANativeWindow` surface. |
