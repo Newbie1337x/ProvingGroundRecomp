@@ -197,7 +197,7 @@ index d26cd4f..07b17a6 100644
  
    Texture* texture_used_first_ = nullptr;
 diff --git a/include/rex/graphics/primitive_processor.h b/include/rex/graphics/primitive_processor.h
-index 2945731..ed1ee2d 100644
+index 2945731..82bcdfd 100644
 --- a/include/rex/graphics/primitive_processor.h
 +++ b/include/rex/graphics/primitive_processor.h
 @@ -101,6 +101,15 @@ namespace rex::graphics {
@@ -233,7 +233,7 @@ index 2945731..ed1ee2d 100644
  
   private:
  #if XE_GPU_PRIMITIVE_PROCESSOR_SIMD_SIZE
-@@ -751,6 +770,19 @@ class PrimitiveProcessor {
+@@ -751,6 +770,21 @@ class PrimitiveProcessor {
    // If an entry was found in the cache (GetFoundResult results non-null), it
    // MUST be used instead of processing - this class doesn't provide the
    // possibility replace existing entries.
@@ -243,6 +243,8 @@ index 2945731..ed1ee2d 100644
 +                                   uint32_t reset_index_guest_endian, CachedResult& result);
 +  struct StaticIndexEntry {
 +    uint32_t generation;
++    // native_ranges::RemovalVersion() when the generation was last confirmed.
++    uint32_t removal_version;
 +    uint32_t reset_index_guest_endian;
 +    CachedResult result;
 +    size_t persistent_handle;
@@ -2275,7 +2277,7 @@ index 76f5600..52ee28c 100644
          scaled_resolve_pages_l2_[i] &= ~(UINT64_C(1) << resolve_block_relative_index);
        }
 diff --git a/src/graphics/primitive_processor.cpp b/src/graphics/primitive_processor.cpp
-index d49e9c3..90dde2c 100644
+index d49e9c3..96b5f21 100644
 --- a/src/graphics/primitive_processor.cpp
 +++ b/src/graphics/primitive_processor.cpp
 @@ -15,9 +15,11 @@
@@ -2359,7 +2361,7 @@ index d49e9c3..90dde2c 100644
        REXGPU_ERROR(
            "PrimitiveProcessor: Failed to request index buffer 0x{:08X}, 0x{:X} "
            "bytes needed, in the shared memory",
-@@ -976,6 +997,61 @@ bool PrimitiveProcessor::IsResetUsed(const uint16_t* source, uint32_t count,
+@@ -976,6 +997,72 @@ bool PrimitiveProcessor::IsResetUsed(const uint16_t* source, uint32_t count,
    return false;
  }
  
@@ -2370,16 +2372,27 @@ index d49e9c3..90dde2c 100644
 +  if (!REXCVAR_GET(gpu_trust_native_ranges) || !native_ranges::Count()) {
 +    return false;
 +  }
-+  const uint32_t generation = native_ranges::Lookup(base, bytes);
-+  if (!generation) {
-+    return false;
-+  }
 +  const uint64_t key = (uint64_t(base) << 32) | count;
++  const uint32_t removal_version = native_ranges::RemovalVersion();
 +  auto it = static_index_entries_.find(key);
++  uint32_t generation;
++  if (it != static_index_entries_.end() && it->second.removal_version == removal_version) {
++    // Nothing was replaced since the range was found.
++    generation = it->second.generation;
++  } else {
++    generation = native_ranges::Lookup(base, bytes);
++    if (!generation) {
++      return false;
++    }
++    if (it != static_index_entries_.end() && it->second.generation == generation) {
++      it->second.removal_version = removal_version;
++    }
++  }
 +  if (it == static_index_entries_.end() || it->second.generation != generation ||
 +      it->second.reset_index_guest_endian != reset_index_guest_endian) {
 +    StaticIndexEntry entry;
 +    entry.generation = generation;
++    entry.removal_version = removal_version;
 +    entry.reset_index_guest_endian = reset_index_guest_endian;
 +    entry.result = result;
 +    entry.persistent_handle = SIZE_MAX;
@@ -6106,12 +6119,13 @@ index fc46d86..83c2d8b 100644
      xex_module.cpp
 diff --git a/src/system/native_ranges.cpp b/src/system/native_ranges.cpp
 new file mode 100644
-index 0000000..f726e3d
+index 0000000..e7cf327
 --- /dev/null
 +++ b/src/system/native_ranges.cpp
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,94 @@
 +#include <rex/graphics/native_ranges.h>
 +
++#include <algorithm>
 +#include <atomic>
 +#include <map>
 +#include <unordered_map>
@@ -6131,6 +6145,18 @@ index 0000000..f726e3d
 +std::unordered_map<uint32_t, Range> g_by_start;
 +uint32_t g_generation = 0;
 +std::atomic<uint32_t> g_count{0};
++// Pages (4 KB) of the 512 MB of physical memory that any registered range ever touched; never
++// cleared, so a clear bit means no range can contain an address in that page.
++constexpr uint32_t kPageShift = 12;
++constexpr uint32_t kPageCount = (uint32_t(1) << 29) >> kPageShift;
++std::atomic<uint64_t> g_pages[kPageCount / 64];
++
++void MarkPages(uint32_t start, uint64_t end) {
++  uint64_t last = std::min<uint64_t>(end - 1, (uint64_t(1) << 29) - 1);
++  for (uint64_t page = start >> kPageShift; page <= (last >> kPageShift); ++page) {
++    g_pages[page >> 6].fetch_or(uint64_t(1) << (page & 63), std::memory_order_relaxed);
++  }
++}
 +std::atomic<uint32_t> g_removal_version{0};
 +std::atomic<uint32_t> g_change_version{0};
 +
@@ -6156,6 +6182,7 @@ index 0000000..f726e3d
 +  if (!++g_generation) ++g_generation;
 +  g_ranges.emplace(start, Range{end, g_generation});
 +  g_by_start.emplace(start, Range{end, g_generation});
++  MarkPages(start, end);
 +  g_count.store(uint32_t(g_ranges.size()), std::memory_order_relaxed);
 +}
 +
@@ -6167,6 +6194,13 @@ index 0000000..f726e3d
 +
 +uint32_t Lookup(uint32_t start, uint32_t length) {
 +  if (!g_count.load(std::memory_order_relaxed)) return 0;
++  if (start >= (uint32_t(1) << 29)) return 0;
++  {
++    const uint32_t page = start >> kPageShift;
++    if (!(g_pages[page >> 6].load(std::memory_order_relaxed) & (uint64_t(1) << (page & 63)))) {
++      return 0;
++    }
++  }
 +  std::shared_lock lock(g_mutex);
 +  auto exact = g_by_start.find(start);
 +  if (exact != g_by_start.end()) {

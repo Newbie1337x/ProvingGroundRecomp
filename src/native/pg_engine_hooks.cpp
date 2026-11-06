@@ -288,6 +288,7 @@ struct Registered {
   uint32_t vertex_buffer;
 };
 std::unordered_map<uint32_t, Registered> g_registered;  // by physical address
+uint64_t g_registrations = 0;
 
 // Registers one buffer's data (physical address and size) as static.
 void RegisterStaticRange(uint32_t data, uint32_t size, uint32_t buffer_object) {
@@ -299,6 +300,7 @@ void RegisterStaticRange(uint32_t data, uint32_t size, uint32_t buffer_object) {
     if (it->second.size == size && it->second.vertex_buffer == buffer_object) return;
     it->second = {size, buffer_object};
   }
+  ++g_registrations;
   rex::graphics::native_ranges::Register(physical, size);
 }
 
@@ -344,6 +346,8 @@ void OnSwapForEngineHooks() {
       g_stats.frames, g_stats.meshes / f, g_stats.indices / f, g_stats.flat / f,
       g_stats.skipped / f, g_stats.records.size(), g_stats.vertex_buffers.size(),
       g_stats.index_buffers.size(), g_stats.effects.size(), g_stats.declarations.size());
+  REXLOG_INFO("Engine mesh static range registrations: {} so far, {} buffers",
+              g_registrations, g_registered.size());
   REXLOG_INFO("Engine meshes per frame by primitive{}; by blend mode{}; by stride{}",
               Histogram(g_stats.primitives, g_stats.frames),
               Histogram(g_stats.blend_modes, g_stats.frames),

@@ -260,3 +260,8 @@ Uncapped (`--frame_rate_limit=0`) A/B of `gpu_trust_native_ranges`, which now co
 heavy frames 7.80 ms off, 6.43 ms on (-1.27 ± 0.22 ms, 19 pairs). At the start of this work
 the same frames took about 8.5 ms. The capture at the same point of the route shows the same
 geometry.
+
+Follow-up (same day): the registry keeps a bitmap of the 4 KB pages any range touched, so a
+lookup for dynamic data is a bit test, and a static index buffer skips the lookup while no
+range was replaced. Uncapped heavy frames: 6.10-6.16 ms. Tried and dropped: keeping a texture
+binding when the guest writes the same fetch constant again (+0.29 ± 0.26 ms, no gain).
