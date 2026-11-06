@@ -164,6 +164,5 @@ What the dumps showed:
 - **World meshes are already in world space**: no per-mesh transform is needed to draw
   them. The 11 meshes whose positions are not plain floats are the characters (skinned);
   one wide, high mesh is the sky dome.
-- **Shader objects carry the path of their effect file** (`c:
-xcommon\dataxfiles_07\...`),
+- **Shader objects carry the path of their effect file** (`c:\nxcommon\data\fxfiles_07\...`),
   which will name the effects in step 2.
