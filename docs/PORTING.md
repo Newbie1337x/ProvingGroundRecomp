@@ -251,7 +251,16 @@ of its CPU, about 20% less CPU for the whole game, and averages of 33 to 55 FPS 
 
 Still limiting: HyperOS holds the fast cores at 1.6 GHz (of 2.8) and the prime core at 1.46 GHz
 (of 3.0) even at 65 °C, so it is a power profile and not only heat; the phone's performance
-mode may lift it. Four guest worker threads also sleep and wake about 2400 times a second each.
+mode may lift it.
+
+The frame rate counter hides how uneven it is: `log_frame_stats = true` logs the frame time
+distribution every 5 seconds, and in gameplay most frames take 16.7 ms while 15 to 45% take 50
+to 85 ms (the frames with 1500+ draws). In those, the GPU command thread spends 24 to 30 ms of
+wall time drawing, and the guest worker threads, which hand jobs to each other about 1800 times a
+second each, spend about a quarter of their time runnable but not running: waking a thread on the
+phone takes about 150 µs, while the fast cores are only 77% busy. Signals that notified with no
+waiter (a futex call each on bionic) and an Audio Worker woken by every signal in the process
+were fixed; the Audio Worker went from 26% to 6% of a core.
 
 ### Still missing
 
@@ -295,7 +304,7 @@ scripts do not apply it yet):
 | `src/ui/window_sdl.cpp` | Vulkan surface from SDL's `ANativeWindow`. |
 | `src/core/filesystem_posix.cpp` | Executable folder on Android: the APK's native library folder. |
 | `src/ui/rex_app.cpp` | Settings and logs in the user folder on Android. |
-| `src/core/threading_posix.cpp` (also) | `WaitMultiple` sleeps until any object is signaled instead of polling every millisecond (and spinning in the last one). |
+| `src/core/threading_posix.cpp` (also) | `WaitMultiple` sleeps until one of its objects is signaled instead of polling every millisecond (and spinning in the last one). Signals only notify when a thread waits: bionic makes a futex call for every notify. |
 | `src/core/timer_queue.cpp` | The timer queue blocks instead of spinning (it woke about 1000 times a second with no timer due); a thread name that fits in 15 characters. |
 | `src/graphics/vulkan/pipeline_cache.cpp`, `include/rex/graphics/vulkan/pipeline_cache.h`, `include/rex/ui/vulkan/functions/device_1_0.inc` | Read the shader and pipeline storage from the start of the file (bionic starts `a+` streams at the end, so every Android run threw the storage away). A persistent `VkPipelineCache` (`cache/shaders/shareable/<title>.vk.pipelinecache`), saved every 10 seconds while pipelines are being added and at shutdown. |
 | `src/system/mmio_handler.cpp` | On Linux, write faults on watched pages no longer re-check the page protection, which parsed `/proc/self/maps` under the global lock (about 20 ms of lock waits per frame on the GPU command thread). Read faults still re-check. |
