@@ -97,6 +97,48 @@ The engine functions that make them:
 
 So the engine's renderer sits in 0x824BE000-0x824D1000, plus `sub_8250D4E8` and the
 `sub_824FFxxx` state functions. These are where approach 2 hooks the engine: `sub_824C4128`
-alone issues about 80% of the draws in gameplay. Next: name the setters (their writes into
-the device structure tell which state each one sets) and read the mesh and material
-structures `sub_824C4128` walks.
+alone issues about 80% of the draws in gameplay.
+
+## Names and the first engine hook (2026-11-06)
+
+The entry points and engine functions now have names, in `tools/native/d3d_names.txt`
+(the trace report prints them). They come from what each function writes into the device
+(at 0x40001A00 in guest memory) and from arguments sampled by the tracer: a Direct3D
+resource's first word holds its type (0x00100003 texture, 0x00100004 surface, 0x00100005
+vertex declaration). Names marked `?` are guesses. The hot ones are sure:
+`DrawIndexedVertices`, `SetTexture`, `SetStreamSource`, `SetIndices`,
+`SetVertexDeclaration`, `SetVertexShader`, `SetPixelShader` and the two
+`Set*ShaderConstantF`.
+
+`sub_824C4128` is `Engine_DrawMesh(mesh record, effect override)`. For one mesh it sets the
+vertex declaration (if it changed), the vertex buffer on streams 0 and 1, the index buffer,
+then for each pass of the mesh's effect (`Engine_ApplyEffectPass`, `sub_824C68D8`, until it
+returns 0) draws the indexed triangle strip. A second path draws the mesh in a flat color
+with a blend mode from a 13-entry table. The record's layout is in
+`src/native/pg_engine_mesh.h`.
+
+`src/native/pg_engine_hooks.cpp` hooks it (the Skate 3 entry point). For now it only
+observes:
+
+- `--native_mesh_stats` logs what the meshes use every 10 s. In the skatepark: about 520
+  meshes a frame, all indexed triangle strips with blend mode 3 and no flat-color draws;
+  over 10 s about 2,300 mesh records, 2,250 vertex and index buffers, 1,400 effects and 52
+  vertex declarations (strides 12 to 60 bytes).
+- `--native_skip_meshes` skips it. The scene and the character disappear; the HUD, the
+  character's outline and the dark background stay. On the route
+  (`tools/dev/route.ps1 measure skatepark`), draws per frame fall from 905 to 272 and the GPU
+  command thread's work from 4.49 to 1.38 ms: **this one function is 70% of the draws and of
+  the emulated renderer's cost.**
+
+So a native renderer that only replaces `Engine_DrawMesh` already takes most of the
+emulation out. What it needs, in order:
+
+1. Vertex data: read the vertex declaration's elements and the buffers' guest addresses
+   and sizes, and upload each buffer once (the records and buffers repeat from frame to frame).
+2. The effects: each pass's vertex and pixel shader (the shader objects `SetVertexShader`
+   and `SetPixelShader` receive) translated ahead of time, as Skate 3 and Unleashed do with
+   XenosRecomp, plus the constants `Engine_ApplyEffectPass` sets.
+3. Drawing into the emulated renderer's current render target and depth buffer, so the rest
+   of the frame (HUD, outline, post effects) still works. This is the decision that needs
+   the SDK side: the Vulkan backend has to expose its current EDRAM render target as a
+   Vulkan image for a native pass.

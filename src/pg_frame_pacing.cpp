@@ -11,6 +11,7 @@
 #include "pg_frame_pacing.h"
 #include "pg_dev.h"
 #include "native/pg_d3d_trace.h"
+#include "native/pg_engine_mesh.h"
 
 #include <algorithm>
 #include <atomic>
@@ -156,6 +157,7 @@ extern "C" void sub_824853A8(PPCContext& __restrict ctx, uint8_t* base) {
   LimitFrameRate();
   CountFrame(Clock::now());
   pg::native::OnSwapForTrace();
+  pg::native::OnSwapForEngineHooks();
   pg::dev::OnSwap(base);
 }
 

@@ -1,0 +1,47 @@
+# Names of the game's Direct3D entry points and of the engine functions that drive them.
+# Found from the generated code (what each function writes into the device at 0x40001A00)
+# and from sampled arguments (--d3d_trace): a Direct3D resource's first word holds its type
+# (0x00100003 texture, 0x00100004 surface, 0x00100005 vertex declaration, 9 query).
+# Format: function  name  [? when the name is a guess]  # evidence
+#
+# Direct3D (the Xbox 360 SDK's D3DDevice_* functions linked into default.xex)
+sub_82578638  D3DDevice_DrawIndexedVertices      # (dev, primitive, base vertex, start index, index count); the only entry point that writes draw packets
+sub_82578208  D3DDevice_DrawVerticesUP           # (dev, primitive, count, vertex data, stride)
+sub_82578250  D3DDevice_BeginVertices ?          # (dev, primitive, 0, stride, ...) before user-pointer vertices
+sub_8257D9F0  D3DDevice_SetTexture               # (dev, sampler, texture): copies the texture's fetch constant (words 28-48) into sampler slot (n+48)*24
+sub_82576290  D3DDevice_SetSamplerState ?        # (dev, sampler, state, value): rewrites words 12-16 of the sampler's fetch constant
+sub_82576420  D3DDevice_SetSamplerState ?        # same shape as sub_82576290, another state group
+sub_82576DF8  D3DDevice_SetStreamSource          # (dev, stream, vertex buffer, offset, stride): vertex fetch constant from buffer words 24/28
+sub_82576FA0  D3DDevice_SetIndices               # (dev, index buffer): stored at +12428, with the buffer's GPU fence
+sub_82579BA8  D3DDevice_SetVertexDeclaration     # (dev, declaration 0x00100005): stored at +11812
+sub_82579720  D3DDevice_SetVertexShader          # (dev, shader): stored at +12684, dirty bits 0x10/0x2 in +16
+sub_825799D8  D3DDevice_SetPixelShader           # (dev, shader): stored at +12688, always called with SetVertexShader
+sub_82579468  D3DDevice_SetVertexShaderConstantF # (dev, start, data, vec4 count, dirty mask): copies into +(n+120)*16, dirty mask in +0
+sub_82579550  D3DDevice_SetPixelShaderConstantF  # (dev, start, data, vec4 count, dirty mask): copies into +(n+376)*16, dirty mask in +8
+sub_825750D8  D3DDevice_SetRenderState_ZWriteEnable  # bit 2 of RB_DEPTHCONTROL (+10548)
+sub_82575108  D3DDevice_SetRenderState_ZFunc     # bits 4-6 of RB_DEPTHCONTROL (+10548)
+sub_82574E08  D3DDevice_SetRenderState_AlphaRef  # integer * 1/255 into +10500
+sub_825749A8  D3DDevice_SetRenderState_AlphaTestEnable ?  # bit 3 of +10556 (RB_COLORCONTROL)
+sub_82577220  D3DDevice_SetRenderState_SrcBlend+DestBlend+BlendOp ?  # (dev, target, RB_BLENDCONTROL value); the engine's blend-mode table feeds it
+sub_82575BB0  D3DDevice_SetRenderState_AlphaBlendEnable ?  # writes 0x400 or 0x43F into +10572
+sub_82576DA8  D3DDevice_SetViewport              # (dev, D3DVIEWPORT9*): {0, 0, 1280, 720, ...}
+sub_825775E8  D3DDevice_SetViewport (integer rectangle) ?  # converts a rectangle to floats and calls sub_82577370
+sub_82576C80  D3DDevice_SetScissorRect ?         # (dev, RECT*): clamps the rectangle to the viewport
+sub_82577D60  D3DDevice_SetRenderTarget          # (dev, index, surface 0x00100004); jumps to sub_82577720
+sub_82577A88  D3DDevice_SetDepthStencilSurface   # (dev, surface 0x00100004): stored at +12448
+sub_82582E30  D3DDevice_Resolve                  # (dev, flags, rect, destination texture 0x00100003, ...)
+sub_8257BC48  D3DDevice_GetBackBuffer/GetDisplayMode ?  # writes width/height (1280x720 and smaller) through pointers
+sub_82580F60  D3DDevice_CreateQuery              # (dev, type 9, ...)
+sub_82580118  D3DQuery_Issue                     # (query, 2 = begin, 1 = end)
+sub_825803A0  D3DQuery_GetData                   # (query, out, size 16, flags)
+sub_8257B5D8  D3DDevice_SetPredication/Clear ?   # called at the end of each engine draw with a query
+
+# Engine (Proving Ground's own renderer)
+sub_824C4128  Engine_DrawMesh                    # draws one mesh: see the layout in src/native/pg_engine_mesh.h
+sub_824C3BD8  Engine_DrawMesh variant ?          # same calls in the same order
+sub_824C3898  Engine_DrawMesh variant ?          # same calls in the same order
+sub_824C36B0  Engine_BeginMeshDraw ?             # called by Engine_DrawMesh before SetIndices
+sub_824C3720  Engine_EndMeshDraw ?               # called by Engine_DrawMesh last
+sub_824C68D8  Engine_ApplyEffectPass             # (effect, pass, ...): sets shaders and constants, returns 0 after the last pass
+sub_824C6488  Engine_BindTextures ?              # calls SetTexture about 2000 times a frame
+sub_8250D4E8  Engine_ApplyMaterial ?             # shaders and constants before the draws

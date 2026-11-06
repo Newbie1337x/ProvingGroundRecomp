@@ -37,6 +37,16 @@ def main():
         i = args.index('--top')
         top = int(args[i + 1])
         del args[i:i + 2]
+    names = {}
+    names_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'd3d_names.txt')
+    for line in open(names_path, encoding='utf-8'):
+        parts = line.split('#')[0].split()
+        if len(parts) >= 2 and parts[0].startswith('sub_'):
+            names[parts[0]] = ' '.join(parts[1:])
+
+    def label(name):
+        return '%s %s' % (name, names[name]) if name in names else name
+
     starts = function_starts()
     if not starts:
         sys.exit('generated/ is empty: build the game first')
@@ -53,7 +63,7 @@ def main():
         if line.startswith('# pg Direct3D trace:'):
             frames = int(line.split()[4])
             continue
-        if line.startswith('#') or not line.strip():
+        if line.startswith('#') or line.startswith('args ') or not line.strip():
             continue
         head, threads, callers = (part.strip() for part in line.split('|'))
         name, per_frame, max_frame, total, game_callers, lines = head.split()
@@ -72,14 +82,14 @@ def main():
 
     print('%d frames traced, %d of the Direct3D entry points called\n' % (frames, len(entries)))
     print('Direct3D entry points by calls per frame:')
-    print('  %-14s %9s %7s  threads' % ('entry', 'per frame', 'max'))
+    print('  %-50s %9s %7s  threads' % ('entry', 'per frame', 'max'))
     for name, per_frame, max_frame, total, threads in entries[:top]:
-        print('  %-14s %9.1f %7d  %s' % (name, per_frame, max_frame, threads))
+        print('  %-50s %9.1f %7d  %s' % (label(name), per_frame, max_frame, threads))
     print('\nEngine functions that call Direct3D, by calls per frame:')
     for fn, count in by_engine.most_common(top):
-        calls = ', '.join('%s x%.1f' % (n, c / max(frames, 1))
+        calls = ', '.join('%s x%.1f' % (names.get(n, n).split()[0], c / max(frames, 1))
                           for n, c in engine_entries[fn].most_common(5))
-        print('  sub_%08X %9.1f  %s' % (fn, count / max(frames, 1), calls))
+        print('  %-40s %9.1f  %s' % (label('sub_%08X' % fn), count / max(frames, 1), calls))
 
 
 if __name__ == '__main__':

@@ -13,6 +13,12 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 #include <string>
 #include <vector>
 
@@ -80,6 +86,60 @@ void CountCaller(uint32_t entry, uint32_t return_address) {
   }
 }
 
+// A few calls of each entry point, spread over the run, with their argument registers and the
+// first two words of whatever guest memory an argument points to (a Direct3D resource keeps
+// its type in its first word, which is how the entry points get their names).
+constexpr uint32_t kArgSamples = 24;
+struct ArgSample {
+  uint32_t regs[6];  // r3-r8
+  uint32_t pointee[6][2];
+};
+std::array<std::atomic<uint32_t>, kEntryCount> g_seen_calls{};
+std::array<std::array<ArgSample, kArgSamples>, kEntryCount> g_arg_samples{};
+std::array<std::atomic<uint32_t>, kEntryCount> g_arg_sample_count{};
+
+bool IsGuestPointer(uint32_t value) {
+  return value >= 0x40000000u && value < 0xA0000000u && !(value & 3);
+}
+
+// An argument may only look like a pointer: read it only where guest memory is committed.
+bool IsCommitted(const uint8_t* host) {
+#ifdef _WIN32
+  MEMORY_BASIC_INFORMATION info;
+  return VirtualQuery(host, &info, sizeof(info)) && info.State == MEM_COMMIT &&
+         !(info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
+         host + 8 <= static_cast<const uint8_t*>(info.BaseAddress) + info.RegionSize;
+#else
+  (void)host;
+  return false;
+#endif
+}
+
+uint32_t LoadGuestU32(const uint8_t* base, uint32_t address) {
+  uint32_t value;
+  std::memcpy(&value, base + address, sizeof(value));
+  return __builtin_bswap32(value);
+}
+
+void SampleArgs(uint32_t entry, const PPCContext& ctx, const uint8_t* base) {
+  const uint32_t seen = g_seen_calls[entry].fetch_add(1, std::memory_order_relaxed);
+  // The first calls, then one in 1009.
+  if (seen >= 8 && seen % 1009) return;
+  const uint32_t slot = g_arg_sample_count[entry].fetch_add(1, std::memory_order_relaxed);
+  if (slot >= kArgSamples) return;
+  ArgSample& sample = g_arg_samples[entry][slot];
+  const uint64_t regs[6] = {ctx.r3.u64, ctx.r4.u64, ctx.r5.u64,
+                            ctx.r6.u64, ctx.r7.u64, ctx.r8.u64};
+  for (int i = 0; i < 6; ++i) {
+    sample.regs[i] = uint32_t(regs[i]);
+    sample.pointee[i][0] = sample.pointee[i][1] = 0;
+    if (IsGuestPointer(sample.regs[i]) && IsCommitted(base + sample.regs[i])) {
+      sample.pointee[i][0] = LoadGuestU32(base, sample.regs[i]);
+      sample.pointee[i][1] = LoadGuestU32(base, sample.regs[i] + 4);
+    }
+  }
+}
+
 void Record(uint32_t entry, uint32_t return_address) {
   g_frame_calls[entry].fetch_add(1, std::memory_order_relaxed);
   if (t_thread_index == UINT32_MAX) {
@@ -130,6 +190,23 @@ void WriteReport(const std::string& path, double seconds) {
     }
     std::fprintf(file, "\n");
   }
+  std::fprintf(file, "# args: entry r3 r4 r5 r6 r7 r8 | words at each pointer argument\n");
+  for (uint32_t i : order) {
+    const uint32_t count = std::min(g_arg_sample_count[i].load(), kArgSamples);
+    for (uint32_t c = 0; c < count; ++c) {
+      const ArgSample& sample = g_arg_samples[i][c];
+      std::fprintf(file, "args %s", kEntries[i].name);
+      for (uint32_t r : sample.regs) std::fprintf(file, " %08X", r);
+      std::fprintf(file, " |");
+      for (int r = 0; r < 6; ++r) {
+        if (IsGuestPointer(sample.regs[r])) {
+          std::fprintf(file, " r%d=%08X,%08X", r + 3, sample.pointee[r][0],
+                       sample.pointee[r][1]);
+        }
+      }
+      std::fprintf(file, "\n");
+    }
+  }
   std::fclose(file);
   std::remove(path.c_str());
   std::rename(temp_path.c_str(), path.c_str());
@@ -167,7 +244,10 @@ void OnSwapForTrace() {
 #define PG_D3D_ENTRY(name, game_callers, lines)                                    \
   extern "C" void __imp__##name(PPCContext& __restrict ctx, uint8_t* base);        \
   extern "C" void name(PPCContext& __restrict ctx, uint8_t* base) {                \
-    if (g_tracing.load(std::memory_order_relaxed)) Record(k_##name, uint32_t(ctx.lr)); \
+    if (g_tracing.load(std::memory_order_relaxed)) {                               \
+      Record(k_##name, uint32_t(ctx.lr));                                          \
+      SampleArgs(k_##name, ctx, base);                                             \
+    }                                                                              \
     __imp__##name(ctx, base);                                                       \
   }
 #include "d3d_entry_points.inc"
