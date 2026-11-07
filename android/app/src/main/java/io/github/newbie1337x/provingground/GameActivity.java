@@ -7,7 +7,12 @@ import android.util.Log;
 
 import org.libsdl.app.SDLActivity;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Runs the game: SDL's activity loads librexruntime.so (which holds SDL) and libmain.so. */
 public class GameActivity extends SDLActivity {
@@ -37,8 +42,25 @@ public class GameActivity extends SDLActivity {
 
     @Override
     protected String[] getArguments() {
+        List<String> args = new ArrayList<>();
         String folder = getIntent().getStringExtra(SetupActivity.EXTRA_GAME_FOLDER);
-        if (folder == null) return new String[0];
-        return new String[] {"--game_data_root=" + folder};
+        if (folder != null) args.add("--game_data_root=" + folder);
+        // Developer runs: one more argument per line of ProvingGroundRecomp/args.txt (adb push),
+        // e.g. an input replay with its own --user_data_root so the player's saves stay untouched.
+        File files = getExternalFilesDir(null);
+        File extra = files == null ? null : new File(files, "ProvingGroundRecomp/args.txt");
+        if (extra != null && extra.isFile()) {
+            try (BufferedReader reader = new BufferedReader(new FileReader(extra))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    line = line.trim();
+                    if (!line.isEmpty() && !line.startsWith("#")) args.add(line);
+                }
+            } catch (IOException e) {
+                Log.e(TAG, "Cannot read " + extra, e);
+            }
+            Log.i(TAG, "Arguments: " + args);
+        }
+        return args.toArray(new String[0]);
     }
 }

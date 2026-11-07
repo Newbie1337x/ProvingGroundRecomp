@@ -95,6 +95,8 @@ std::atomic<int64_t> tick_wait_ns{0};
 std::atomic<uint32_t> main_loop_frames{0};
 // Main loop frames handed to the render thread since start (never reset).
 std::atomic<uint64_t> main_loop_frame_count{0};
+// Sum of the engine's frame time over those frames (seconds), written by the main loop.
+std::atomic<double> main_loop_engine_time{0.0};
 
 // Waits until done() is true, or up to kMaxWait.
 template <typename Done>
@@ -255,6 +257,10 @@ void LogFrameStats(const uint8_t* base) {
   window_start = now;
 }
 
+uint32_t EngineTimeMillis() {
+  return uint32_t(main_loop_engine_time.load(std::memory_order_relaxed) * 1000.0);
+}
+
 }  // namespace pg
 
 extern "C" void __imp__sub_824852F8(PPCContext& __restrict ctx, uint8_t* base);
@@ -264,6 +270,9 @@ extern "C" void sub_824852F8(PPCContext& __restrict ctx, uint8_t* base) {
   // End of the main loop's last wait for the render thread: its work since then is this frame's.
   static thread_local Clock::time_point work_start{};
   if (from_main_loop) {
+    main_loop_engine_time.store(main_loop_engine_time.load(std::memory_order_relaxed) +
+                                    LoadGuestFloat(base, kFrameDeltaAddress),
+                                std::memory_order_relaxed);
     main_loop_frames.fetch_add(1, std::memory_order_relaxed);
     main_loop_frame_count.fetch_add(1, std::memory_order_release);
 #if REX_PLATFORM_ANDROID

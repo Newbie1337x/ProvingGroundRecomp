@@ -18,5 +18,9 @@ void ApplyFrameRateLimit();
 void LogFrameStats(const uint8_t* base);
 // After each swap: waits for the main loop's next frame (see pg_spin_waits.cpp).
 void WaitForNewMainLoopFrame();
+// The engine's game time in milliseconds: the sum of its frame times over the main loop's frames.
+// It stops while the main loop does (loading), so input scripts timed by it replay the same at
+// any frame rate (see pg_spin_waits.cpp).
+uint32_t EngineTimeMillis();
 
 }  // namespace pg
