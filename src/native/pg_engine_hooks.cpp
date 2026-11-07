@@ -59,7 +59,7 @@ REXCVAR_DEFINE_BOOL(native_static_buffers, true, "Perf",
                     "Tell the GPU emulation that the vertex data of the engine's meshes is "
                     "static (see rex/graphics/native_ranges.h)");
 
-REXCVAR_DEFINE_BOOL(native_draw_markers, false, "Perf",
+REXCVAR_DEFINE_BOOL(native_draw_markers, true, "Perf",
                     "Write a marker packet (type-3 NOP: magic, mesh record, pass) into the "
                     "Direct3D command buffer before each draw of Engine_DrawMesh")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -85,6 +85,12 @@ struct MeshStats {
   uint64_t skipped = 0;
   std::set<uint32_t> records, vertex_buffers, index_buffers, effects, declarations;
   std::map<uint32_t, uint64_t> primitives, blend_modes, strides;
+  // Device dirty masks (dev+0 .. dev+32) at the mesh draws: draws, draws with each mask non-zero,
+  // and per mask, how often each bit is set.
+  uint64_t draws = 0;
+  uint64_t dirty_draws[5] = {};
+  uint64_t only_constants = 0;  // draws where only the ALU constant masks are dirty
+  uint64_t dirty_bits[5][64] = {};
 };
 
 std::mutex g_mutex;
@@ -353,8 +359,25 @@ void BeforeDrawIndexedVertices(PPCContext& ctx, uint8_t* base) {
   const uint32_t record = t_mesh_record;
   if (!record) return;
   const uint32_t pass = t_mesh_pass++;
-  if (!REXCVAR_GET(native_draw_markers)) return;
   const uint32_t device = ctx.r3.u32;
+  if (REXCVAR_GET(native_mesh_stats)) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ++g_stats.draws;
+    bool other = false;
+    for (uint32_t m = 0; m < 5; ++m) {
+      uint64_t mask;
+      std::memcpy(&mask, base + device + m * 8, sizeof(mask));
+      mask = __builtin_bswap64(mask);
+      if (!mask) continue;
+      ++g_stats.dirty_draws[m];
+      if (m >= 2) other = true;
+      for (uint32_t b = 0; b < 64; ++b) {
+        if (mask & (uint64_t(1) << b)) ++g_stats.dirty_bits[m][b];
+      }
+    }
+    if (!other) ++g_stats.only_constants;
+  }
+  if (!REXCVAR_GET(native_draw_markers)) return;
   uint32_t ptr = LoadBigU32(base, device + 48);
   if (ptr > LoadBigU32(base, device + 56)) {
     PPCContext call = ctx;
@@ -397,6 +420,20 @@ void OnSwapForEngineHooks() {
               Histogram(g_stats.primitives, g_stats.frames),
               Histogram(g_stats.blend_modes, g_stats.frames),
               Histogram(g_stats.strides, g_stats.frames));
+  if (g_stats.draws) {
+    std::string bits;
+    for (uint32_t m = 0; m < 5; ++m) {
+      bits += fmt::format(" | dev+{} {:.1f}%:", m * 8, 100.0 * g_stats.dirty_draws[m] / g_stats.draws);
+      for (uint32_t b = 0; b < 64; ++b) {
+        if (g_stats.dirty_bits[m][b] * 20 >= g_stats.draws) {
+          bits += fmt::format(" b{} {:.0f}%", 63 - b, 100.0 * g_stats.dirty_bits[m][b] / g_stats.draws);
+        }
+      }
+    }
+    REXLOG_INFO("Engine mesh draws: {:.1f}/frame, {:.1f}% with only ALU constants dirty; dirty "
+                "masks (PPC bit numbers, bits set in >= 5% of draws){}",
+                g_stats.draws / f, 100.0 * g_stats.only_constants / g_stats.draws, bits);
+  }
   g_stats = MeshStats{};
 }
 

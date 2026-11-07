@@ -544,8 +544,43 @@ Result on the route: every marker is consumed by a draw, none replaced before a 
 ~475 known mesh draws per heavy frame carry one (the rest come from other engine paths into the
 same buffers), ~1 marked draw per frame is not a known mesh draw yet. No visual change. An
 in-run A/B of the markers alone gave +0.87 ± 0.45 ms on a busy machine, within noise of the
-4 stores and one NOP per draw they cost; they are off by default until phase 2 uses them.
+4 stores and one NOP per draw they cost. On by default since phase 2.
 
 Next, phase 2: for a marked draw of a learned (record, pass), the command processor draws from
 what it kept (pipeline, descriptor sets, host index buffer) instead of running the whole
 emulated draw, and the engine side stops producing the Direct3D work it no longer needs.
+
+## Engine bypass, phase 2: native draws of known meshes (2026-11-06)
+
+Where the command thread's time goes decided the shape of this phase: in a profile of the
+route, the draw function (IssueDraw) takes ~70% of the GPU command thread, the packets that
+set registers and constants ~10%. So the game keeps emitting its state (the command processor's
+registers stay exact), and the gain comes from not running the emulated draw for meshes it
+already knows.
+
+`native_mesh_draw` (on by default, with `--native_mesh_draw_verify` to check): the first full
+draw of a marked (mesh record, pass) is learned when it was replayed with a valid fast entry
+(steps 6 and 9), uses a static converted index buffer (step 4), only trusted static vertex
+ranges (step 3) and the render target memo applies (step 10). The entry keeps the active
+shaders, the draw and index buffer parameters, the persistent converted index buffer (buffer
+and offset: the primitive processor's handle is per frame), the vertex fetches and the replay
+key. A later marked draw of the same (record, pass) is drawn from it after cheap checks: same
+draw and index buffer, same shaders, ranges not removed since, same render state hash as the
+fast entry, same vertex fetch constants, render target memo hit with the same render pass,
+textures and samplers still valid (the replay checks). It skips primitive processing, shader
+modification and translation lookups, the replay key, vertex buffer requests, the pipeline
+lookup, the viewport and system constant computation; it still updates the constants and
+descriptor bindings (UpdateBindings) and binds the textures. Any failed check draws the usual
+way.
+
+Verify: the only difference between an entry and the full draw it would have replaced was the
+index buffer handle (a per-frame index); keeping the persistent buffer and offset instead left
+~0.1/frame differences in the render target registers, which the native path reads from the
+current registers anyway. Route: ~285 of ~410 marked draws per heavy frame drawn natively;
+the rest are first draws, ~70/frame not learnable (no static converted index buffer or
+untrusted vertex data), ~40/frame render target changes. In-run A/B on a busy machine: heavy
+frames -0.65 ± 0.22 ms and -0.68 ± 0.74 ms (9.05 -> 8.10 ms mean). No visual change in the
+captures. Level changes are still untested.
+
+Next: the ~70 not-learnable draws (guest DMA index buffers, other vertex data), keeping
+descriptor sets per entry so UpdateBindings only uploads constants, then hand-ported shaders.
