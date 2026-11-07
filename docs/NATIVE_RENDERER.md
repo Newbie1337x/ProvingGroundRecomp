@@ -998,7 +998,9 @@ Steps, each testable on PC (route + screenshots) before the next:
    next render pass where possible (the loads of a submission's first draws are already known
    when it begins), and shared memory uploads of a frame are batched.
 
-Step 1 is done (below); step 2's blits are partly in it already, as the simple path.
+All four steps are done (2026-11-07, below): step 1, steps 2/3, then step 4 with the rest of
+step 2 (the depth resolve). What is left on the twin path is the fallback the design allows:
+transfers between render targets with different EDRAM layouts.
 
 ### Native EDRAM step 1: per-render-target scale (2026-11-07)
 
@@ -1121,3 +1123,60 @@ Limits: depth resolves and resolves with a global draw resolution scale still go
 twin; memory written only into the own-scale texture is stale for the CPU, as with the other
 direct resolves (a load from memory over the range blocks the address). Next (step 4): fewer
 render pass breaks (~40 a frame).
+
+### Native EDRAM step 4 and the rest of step 2 (2026-11-07)
+
+**Texture loads before the render pass** (`--native_hoist_texture_loads`, GPU/Native, default
+true, hot-reloadable). A texture load met inside a render pass (a compute dispatch, which used
+to end the pass) is recorded on its own and spliced into the command stream just before that
+render pass began (`VulkanCommandProcessor::BeginHoistBeforeRenderPass` /
+`EndHoistBeforeRenderPass`, `DeferredCommandBuffer::InsertAt`; the barriers, the compute
+pipeline binding and `deferred_command_buffer()` go to the side stream meanwhile). It is safe
+because inside an unbroken render pass nothing has written shared memory (an upload or a GPU
+write ends the pass with its barrier), checked as: render pass open, no barriers pending,
+shared memory in plain read use (`VulkanSharedMemory::IsReadWithoutBarrier`), the texture not
+sampled by a draw of this render pass (`VulkanTexture::sampled_render_pass_serial`) and not a
+scaled-resolve texture. The texture is also moved to the sampled layout there, so the draw needs
+no barrier. Shared memory uploads were already batched at the submission start
+(`shared_memory_upload_at_submission_start`: 650-800 KB a heavy frame at the start, 30-50 KB in
+order).
+
+**Depth resolve straight into textures.** The main scene's depth is kD24S8 (unorm24, host
+D32_SFLOAT_S8_UINT on this AMD GPU) and is sampled as `k_24_8` (R32_SFLOAT, the unorm24 of the
+word), so it never took the direct path, which only knew float24 depth into `k_24_8_FLOAT`. The
+buffer pass of `ResolveThroughBufferToTexture` now has modes for float24 depth read as
+`k_24_8`, unorm24 depth kept as float32 (rounded to 24 bits) and D24_UNORM words; `k_24_8`
+textures are learned as direct targets. With `native_main_pass_scale_sixteenths` the depth
+resolve goes into a texture at the target's scale like the color ones; at 1x it is a direct
+resolve now too (no shared memory write and texture load each frame).
+
+Per heavy frame at 24 the scaled targets now resolve straight into textures (8 color, 1
+depth); left on the twin path: 7 color copies and 1 depth copy, all transfers between render
+targets with other EDRAM layouts (the shadow-map pass over EDRAM 0/720, a depth-only clear
+target over the color, the 1x1 pitch-1 target), which need the EDRAM sample-mapping shaders.
+
+Route (PC, `--vulkan_gpu_timing=true` only, the two gameplay windows, ms; render pass begins
+per 1500+ draw frame / of them ended by image barriers / by buffer-only barriers):
+
+| run | all frames | 1500+ draw frames (GPU busy) | resolves | render passes |
+|---|---|---|---|---|
+| 16, steps 2/3 | 2.53 / 2.73 | 2.94 / 2.80 | 0.28 / 0.27 | 38.4 / 25.8 / 5.1, 38.6 / 25.6 / 6.6 |
+| 16, hoist off | 2.39 / 2.56 | 2.78 / 2.63 | 0.28 / 0.26 | 40.9 / 28.0 / 4.8, 38.2 / 25.5 / 6.7 |
+| 16 | 2.42 / 2.59 | 2.78 / 2.62 | 0.27 / 0.26 | 37.6 / 27.1 / 2.6, 34.8 / 25.5 / 3.2 |
+| 12, steps 2/3 | 2.54 / 2.62 | 2.60 / 2.44 | 0.22 / 0.20 | 40.3 / 28.8 / 4.9, 36.4 / 26.2 / 5.4 |
+| 12 | 2.39 / 2.62 | 2.41 / 2.28 | 0.20 / 0.19 | 38.1 / 28.8 / 2.5, 36.0 / 27.9 / 2.9 |
+| 24, steps 2/3 | 3.09 / 3.19 | 4.13 / 3.78 | 0.51 / 0.48 | 42.6 / 30.1 / 5.4, 40.5 / 29.4 / 5.9 |
+| 24 | 2.79 / 3.02 | 4.01 / 3.70 | 0.48 / 0.47 | 38.7 / 28.8 / 3.0, 38.2 / 29.1 / 3.5 |
+
+The hoisting takes 2-4 render pass breaks a heavy frame (about half of the buffer-only ones);
+on this desktop GPU that costs nothing measurable (16: 2.78/2.63 off, 2.78/2.62 on), the
+gain is for tiled GPUs (each break stores and reloads the framebuffer), not measured on the
+phone (PC only). The direct depth resolve and steps 2/3 together: 1x heavy frames
+2.94/2.80 -> 2.78/2.62, 0.75 2.41/2.28, 1.5 4.01/3.70. The frame sequence log showed 121 of
+152 texture loads hoisted in two heavy frames. Screenshots at 30/38/46 s at 16 and 24: complete,
+depth effects (fog on the buildings, outlines) as before.
+
+What stays: the ~29 image-barrier breaks a heavy frame are the game's own resolves and
+render target switches (one pass per post effect, each sampling the previous one), not
+removable without merging passes; one run of this batch ended at ~20 s at startup with the
+known guest access violation (read of guest 0x00000008, cvar 16), the rerun was complete.
