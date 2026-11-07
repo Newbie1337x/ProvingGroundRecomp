@@ -663,3 +663,25 @@ Plan: make Direct3D's clears render target cache clears (the cache already leave
 clear's rectangle out of its transfers): rectangle from the vertices, color from the vertices,
 depth from z, stencil from RB_STENCILREFMASK, then no transfer for the cleared area and no
 clear draw. Then step 3 (resolves as direct textures).
+
+### Step 2: Direct3D's clears as render target cache clears
+
+`gpu_clear_as_render_target_clear` (default on; `gpu_clear_as_render_target_clear_kinds`
+1 = depth only, 2 = with color, 3 = both) recognizes Direct3D's clear (vs 0A6D1DD7767FDF27,
+a 3-vertex rectangle list) before the draw and hands it to the render target cache as a
+resolve clear (`VulkanRenderTargetCache::ClearHostRenderTargetsRectangle`): the cache gives
+the rectangle to the cleared render targets without copying the EDRAM's previous contents,
+and no clear draw is made. The rectangle, depth and color come from the vertices; the stencil
+from RB_STENCILREFMASK (zpass ZERO or REPLACE, write mask 0xFF); 4x surfaces are cleared as
+the 1x surface of twice the pitch (as in step 1). Anything else (a non-8-aligned rectangle,
+blending, a partial color mask, a non-zero color, a pixel shader other than Direct3D's
+clear one when it is needed) is drawn the usual way.
+
+One rule found by bisecting: when the clear writes depth and color into the same EDRAM (the
+game clears 1280x720 and 320x176 targets like this, depth base = color base = 0), which of the
+two owns the EDRAM afterwards decides what later passes see; clearing both as a resolve clear
+washed out the image (bloom/lighting), so those clears are left to the draw.
+
+Result: the transfers into the shadow maps, the small pass and the main pass are gone; only the
+1-3 tile bloom transfers remain. In-run A/B (heavy frames, 30-frame halves): -0.24 +- 0.14 ms.
+Images match the step 1 captures.
