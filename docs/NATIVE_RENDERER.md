@@ -584,3 +584,16 @@ captures. Level changes are still untested.
 
 Next: the ~70 not-learnable draws (guest DMA index buffers, other vertex data), keeping
 descriptor sets per entry so UpdateBindings only uploads constants, then hand-ported shaders.
+
+### Phase 2b: guest index buffers (2026-11-06)
+
+A census of why marked draws were not learnable (logged with `vulkan_gpu_timing`) gave, per
+heavy frame, ~60 draws whose index buffer is used straight from guest memory (kGuestDMA:
+lists without restart, nothing to convert) and ~20 whose vertex data is not a registered
+static range (likely animated characters). The primitive processor requests guest index
+buffers on every draw. Now, when such an index buffer lies in a range the game registered as
+static, the draw that learns the mesh (which just requested it) marks the range trusted, like
+the static vertex ranges, and the entry keeps the shared memory buffer and the index offset.
+Not learnable: ~60-80 -> ~15-25 per frame; verify still finds no differences; in-run A/B of
+native draws on/off: heavy frames -1.52 ± 0.43 ms (busy machine, 10.65 -> 9.17 ms), up from
+-0.65 ms before.
