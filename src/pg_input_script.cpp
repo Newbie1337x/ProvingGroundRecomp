@@ -1,10 +1,12 @@
 #include "pg_input_script.h"
+#include "pg_frame_pacing.h"
 
 #include <array>
 #include <cstring>
 #include <iterator>
 
 #include <rex/chrono/clock.h>
+#include <rex/cvar.h>
 #include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/perf/counter.h>
@@ -18,7 +20,20 @@ using rex::input::X_INPUT_KEYSTROKE;
 using rex::input::X_INPUT_STATE;
 using rex::input::X_INPUT_VIBRATION;
 
+REXCVAR_DEFINE_BOOL(input_record_guest_clock, false, "Input",
+                    "Record with guest milliseconds (pg-input v1) instead of the game's time")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_STRING(input_replay_rewrite, "", "Input",
+                      "While replaying, write the script again to this file with the game's "
+                      "time of each event (turns a v1 route into v2)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 namespace {
+
+constexpr const char* kHeaderV1 =
+    "# pg-input v1: guest ms since first poll; pad buttons(hex) lt rt lx ly rx ry\n";
+constexpr const char* kHeaderV2 =
+    "# pg-input v2: game ms since first poll; pad buttons(hex) lt rt lx ly rx ry\n";
 
 using rex::input::DeviceId;
 using rex::ui::VirtualKey;
@@ -90,12 +105,19 @@ std::unique_ptr<PgInputScript> PgInputScript::Create(rex::input::InputSystem* sy
       REXLOG_ERROR("Input script: cannot create {}", path);
       return nullptr;
     }
-    std::fputs("# pg-input v1: guest ms since first poll; pad buttons(hex) lt rt lx ly rx ry\n",
-               script->file_);
+    script->clock_ =
+        REXCVAR_GET(input_record_guest_clock) ? Clock::kGuest : Clock::kEngine;
+    std::fputs(script->clock_ == Clock::kGuest ? kHeaderV1 : kHeaderV2, script->file_);
     REXLOG_INFO("Input script: recording to {} (F9 toggles the measurement window)", path);
   } else {
     if (!script->LoadLocked(path)) return nullptr;
-    REXLOG_INFO("Input script: replaying {} ({} events)", path, script->events_.size());
+    REXLOG_INFO("Input script: replaying {} ({} events, {})", path, script->events_.size(),
+                script->clock_ == Clock::kEngine ? "game time" : "guest time");
+    const std::string rewrite = REXCVAR_GET(input_replay_rewrite);
+    if (!rewrite.empty()) {
+      script->rewrite_ = rex::filesystem::OpenFile(rex::to_path(rewrite), "w");
+      if (script->rewrite_) std::fputs(kHeaderV2, script->rewrite_);
+    }
   }
   return script;
 }
@@ -118,6 +140,7 @@ PgInputScript::~PgInputScript() {
     if (started_) WriteLocked(NowLocked(), "end");
     std::fclose(file_);
   }
+  if (rewrite_) std::fclose(rewrite_);
 }
 
 bool PgInputScript::LoadLocked(const std::string& path) {
@@ -130,10 +153,12 @@ bool PgInputScript::LoadLocked(const std::string& path) {
   int line_number = 0;
   uint32_t last_ms = 0;
   bool ok = true;
+  clock_ = Clock::kGuest;
   while (std::fgets(line, sizeof(line), file)) {
     ++line_number;
     char* text = line + std::strspn(line, " \t");
     text[std::strcspn(text, "\r\n")] = '\0';
+    if (line_number == 1 && !std::strncmp(text, "# pg-input v2", 13)) clock_ = Clock::kEngine;
     if (!*text || *text == '#') continue;
     Event event;
     char kind[32] = {};
@@ -144,6 +169,8 @@ bool PgInputScript::LoadLocked(const std::string& path) {
       break;
     }
     const char* rest = text + consumed;
+    event.line = text + std::strcspn(text, " \t");
+    event.line.erase(0, event.line.find_first_not_of(" \t"));
     if (!std::strcmp(kind, "pad")) {
       unsigned buttons, lt, rt;
       int lx, ly, rx, ry;
@@ -184,7 +211,8 @@ bool PgInputScript::LoadLocked(const std::string& path) {
 }
 
 uint32_t PgInputScript::NowLocked() {
-  uint32_t uptime = rex::chrono::Clock::QueryGuestUptimeMillis();
+  uint32_t uptime = clock_ == Clock::kEngine ? pg::EngineTimeMillis()
+                                             : rex::chrono::Clock::QueryGuestUptimeMillis();
   if (!started_) {
     started_ = true;
     start_ms_ = uptime;
@@ -252,6 +280,13 @@ void PgInputScript::AdvanceLocked(uint32_t now) {
 }
 
 void PgInputScript::FireLocked(const Event& event) {
+  if (rewrite_) {
+    // The engine's time when the event fires (this replay may run on the guest clock).
+    const uint32_t engine_ms = pg::EngineTimeMillis();
+    static const uint32_t engine_start = engine_ms;
+    std::fprintf(rewrite_, "%u %s\n", engine_ms - engine_start, event.line.c_str());
+    std::fflush(rewrite_);
+  }
   switch (event.kind) {
     case Kind::kPad:
       current_ = event.pad;

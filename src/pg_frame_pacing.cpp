@@ -207,6 +207,10 @@ void TraceSwap(const uint8_t* base, Clock::time_point swap_start, Clock::time_po
 
 namespace pg {
 
+uint32_t EngineTimeMillis() {
+  return uint32_t(main_loop_engine_time.load(std::memory_order_relaxed) * 1000.0);
+}
+
 void SetPacingTraceActive(bool active) {
   static std::once_flag open;
   std::call_once(open, [] {
