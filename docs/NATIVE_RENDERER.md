@@ -294,7 +294,7 @@ So a mesh in a pass is a fixed thing: its pipeline, texture descriptor set, vert
 converted index buffer can be made once and kept. What changes per draw are the constants
 (matrices, per-object values), which the engine knows.
 
-### Plan for native draws, easiest first
+### Plan for native draws, easiest first (step 1 done below)
 
 1. **Replay a known item inside the command processor.** When a draw's item and shader pair
    match a kept entry, and a cheap check (render pass, used fetch constants, the render state
@@ -308,3 +308,25 @@ converted index buffer can be made once and kept. What changes per draw are the 
 4. **Drawing straight into the current render target.** Issuing the engine's draws from the
    hook, not from the guest command stream. This needs an SDK design decision on how native
    draws share the EDRAM render target with the emulator.
+
+## Step 6: replaying a known mesh's textures and samplers (2026-11-06)
+
+`native_draw_replay` (default on, hot reload) is the plan's first step. Per draw item and
+shader translations, after a normal draw the command processor keeps what the sampler and
+texture work produced: the used texture fetch constants, the textures, the samplers and the
+descriptor image infos. When the same item comes back, it is replayed if:
+
+- the used fetch constants are the same bytes (a new material on the mesh records again);
+- no texture was destroyed and the scaled resolve pages did not change since (generations);
+- none of its textures has outdated data (their memory was not written);
+- its samplers, marked used once per submission, are still the same objects;
+- `anisotropic_override` is unchanged.
+
+Then the sampler parameters, `RequestTextures` and the image view lookups are skipped: the
+textures are only marked used and transitioned for sampling, and the descriptor image infos
+come from the entry. Any failed check drops the entry and the draw takes the normal path.
+
+Skatepark route: about 470 mesh draws replayed per heavy frame, about 5 failed checks.
+In-run A/B (`--perf_ab_cvar=native_draw_replay`, uncapped), heavy frames: 7.06 ms off,
+6.34 ms on (-0.79 ± 0.15 ms); a second run -0.33 ± 0.26 ms (the machine was busy with
+another game). Captures show the same image.
