@@ -795,3 +795,57 @@ Steps 2-4 were limited to `resolution_scale` 1. Now:
 - A/B at 1440p (`--resolution_scale=2`, unloaded machine, separate runs): heavy frames
   7.31 -> 6.45 ms (137 -> 155 fps), mean 277 -> 299 fps. GPU timing: resolved-target texture
   loads 0.98 -> 0.01 ms, transfers 0.31 -> ~0.07 ms; the clears now count under resolves.
+
+## Engine bypass, phase 3: design (2026-11-07)
+
+### Where the time is now (720p, uncapped, `profile_route.ps1 -Sample -Timeline`)
+
+Heaviest 5% of frames (~7.3 ms in the diagnostic build): the GPU command thread works ~5.5 ms
+(waits 1.2 ms for the game, 0.5 ms on fences); the game's render thread (XThread605C) works
+~5.3 ms and waits ~1.9 ms. Over the run the render thread is 97% "busy", but 22% is the swap's
+spin on the flip counter (`sub_824853A8`) and ~18% Direct3D's spin waiting for the GPU to
+consume the command buffer (`sub_825845E8`, under `sub_8257AC80` / `sub_825740C8`). So the two
+threads are about even and run partly in series: phase 3 pays only if it cuts both.
+
+Render thread, inclusive: `Engine_DrawMesh` 25.6% (of which `Engine_BindTextures` 12%,
+`DrawIndexedVertices` 8.8%, the constant flush `sub_8258BD98` 3.7%), `Engine_ApplyMaterial` 5%.
+Our own hook's `RegisterStaticRange` was 2.8% (an unordered_map under a mutex, twice per mesh):
+a direct-mapped per-record cache of the buffers' fetch words now skips it (1.0%).
+
+### How Direct3D flushes a draw (sub_82578638)
+
+The device mirrors the GPU registers at fixed offsets and keeps five 64-bit dirty masks:
+dev+0 vertex shader float constants (dev+1920 -> register 0x4000), dev+8 pixel shader float
+constants (dev+6016 -> 0x4400), dev+16 render state (ranges 0x2000/0x2100/0x2180/0x2200 from
+dev+10368/10444/10528/10548, plus shader setup in `sub_8258CB30` / `sub_8258B660`), dev+24
+fetch constants (`sub_8258BC38`, and 0x2280 from dev+10596), dev+32 the rest (0x2300, 0x2380,
+bool/loop constants 0x4900 from dev+10112). The draw writes every dirty range into the command
+buffer (dev+48 write pointer), clears the masks, then writes the DRAW_INDX packet. Census on
+the route (`--native_mesh_stats`): every mesh draw has vertex constants (one group, likely the
+world matrix) and pixel constants (~4 groups) and fetch constants dirty; 55% also render state.
+
+### Plan
+
+The engine compares some state against its own caches, not the device: `Engine_DrawMesh` sets
+the vertex declaration only when it differs from a global (0x82C2ED10 + 11584). So skipping
+Direct3D calls while the engine runs would desync those caches; each one must be found and
+reset after a bypassed mesh.
+
+1. **3a, capture instead of flush.** For a (record, pass) the command processor reports as
+   drawable natively (a registry like `native_ranges`, written by the SDK), the hook replaces
+   `DrawIndexedVertices` with one NOP packet carrying the record, pass and the used float and
+   fetch constants read from the device mirror; the dirty masks stay set, so the next
+   emulated draw writes everything still dirty. Only when the dirty render state is the one
+   learned for that entry. Saves the flush on the render thread and the register packets on
+   the command thread.
+2. **3b, capture the setters.** Inside a bypassed `Engine_DrawMesh`, the Direct3D wrappers
+   (`pg_d3d_trace.cpp` already wraps every entry point) record `SetTexture`, the constant
+   setters, shaders and streams instead of running them; the engine's caches are reset after.
+   Saves `Engine_BindTextures`' 2000 SetTexture calls a frame.
+3. **3c, the main pass at our own resolution.** The native draws go into images of any size
+   (e.g. 1.33x or 1.7x of 720p for FSR); shadow maps and post effects keep the integer
+   resolution scale. Needs the post chain's reads of the main pass redirected to those images.
+
+Expected: 3a+3b take roughly 1-1.5 ms off each thread in heavy frames, about 1.3x on heavy
+frames (not 2x: the command thread still issues every draw, and the waits between the threads
+remain). 3c is a GPU-side gain, at high resolutions.

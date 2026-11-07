@@ -331,7 +331,32 @@ void RegisterStaticRange(uint32_t data, uint32_t size, uint32_t buffer_object) {
   rex::graphics::native_ranges::Register(physical, size);
 }
 
+// What the last registration of a mesh record's buffers saw, so a record drawn again with the
+// same buffers (nearly every draw) skips the lock and the map. Direct-mapped by record address;
+// written only on the render thread that draws the meshes.
+struct SeenBuffers {
+  uint32_t record = 0;
+  uint32_t vertex_buffer = 0, vertex_words[2] = {};
+  uint32_t index_buffer = 0, index_words[2] = {};
+};
+SeenBuffers g_seen_buffers[4096];
+
 void RegisterStaticBuffers(const uint8_t* base, const pg::native::EngineMesh& mesh) {
+  SeenBuffers current;
+  current.record = mesh.address;
+  current.vertex_buffer = mesh.vertex_buffer;
+  current.index_buffer = mesh.index_buffer;
+  if (mesh.vertex_buffer) {
+    current.vertex_words[0] = pg::native::LoadBigU32(base, mesh.vertex_buffer + 24);
+    current.vertex_words[1] = pg::native::LoadBigU32(base, mesh.vertex_buffer + 28);
+  }
+  if (mesh.index_buffer) {
+    current.index_words[0] = pg::native::LoadBigU32(base, mesh.index_buffer + 24);
+    current.index_words[1] = pg::native::LoadBigU32(base, mesh.index_buffer + 28);
+  }
+  SeenBuffers& seen = g_seen_buffers[(mesh.address >> 4) & 4095];
+  if (std::memcmp(&seen, &current, sizeof(current)) == 0) return;
+  seen = current;
   std::lock_guard<std::mutex> lock(g_mutex);
   if (mesh.vertex_buffer) {
     // Words 24/28: the GPU vertex fetch constant (address | type, size in words << 2 | endian).
