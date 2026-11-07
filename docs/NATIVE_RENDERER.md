@@ -765,3 +765,16 @@ Follow-up (shadow maps back on by default, plus robustness):
 - Checked with the user watching runs: no flicker in normal play. The NPC outline that pulses
   is the game's own effect (it looked like a regression in A/B runs).
 - A/B (whole direct path, loaded machine): -0.38 +- 0.29 and -0.21 +- 0.17 ms per heavy frame.
+
+### Remaining transfers: merged clear chunks
+
+Of the ~10 transfers left, the largest came from Direct3D clearing in chunks (shadow maps x
+0-960 + 960-1024 and 0-480 + 480-512, the 256x256 target 0-240 + 240-256): the first chunk as a
+render target cache clear made the cache copy the rest of the target from its previous owner,
+then the second chunk overwrote it. The clear now waits (`pending_rt_clear_`) and the next
+chunk with the same targets, values and rows, side by side, is merged into it; it is done at
+the next draw that is not a mergeable clear, at a resolve and at the swap. The 1024 shadow
+map's transfer went 0.031 -> 0.007 ms (what is left is the partial tile column past 1024).
+Still on the emulated path (~0.09 ms GPU per heavy frame): the full-screen passes over memory
+another target owned (C0 <- D0, the 1-3 tile luminance chain C0 1440 pitch 1 <-> pitch 4),
+partial tiles past the cleared rectangles, and the two fallback resolves.
