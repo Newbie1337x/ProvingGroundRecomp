@@ -440,3 +440,27 @@ same fraction matters more.
 3. **Skip primitive processing and vertex buffer checks**, then the remaining sections, until
    a known mesh draw is constants + binds + draw.
 4. Only then, if the game thread sets the frame time, consider B.
+
+## Step 8: the render state hash (design step 1, 2026-11-06)
+
+The command processor now keeps the running register hash from the design (`state_hash_`,
+updated in `WriteRegister`; nothing reads it for drawing yet). `--native_state_census`
+(with `--vulkan_gpu_timing`) counts, for each known mesh draw, whether the hash equals the one
+at the item's previous draw, logs the registers that change most, and for up to 256 items
+keeps a copy of the registers to log which ones differ when the hash does.
+
+Hashing every non-constant register matched only 2.5% of known mesh draws. The per-item
+comparison showed why: almost every mismatch was `CP_RB_WPTR` (the ring buffer write
+pointer) and `D1GRPH_PRIMARY_SURFACE_ADDRESS` (the display surface, which flips every frame),
+neither of which changes how a draw renders. With those and the other non-drawing registers
+left out (`native_state_hash_exclude`, default: ring and display, scratch and callback,
+coherency and wait, event initiator, resolve copy and clear, occlusion query address,
+constant flushes), **99.5% of known mesh draws (about 640 per heavy frame) come with exactly
+the same render state as their item's previous draw**. The remaining differences are real:
+a mesh drawn into a different render target and viewport (another pass), stencil reference,
+interpolator control.
+
+The Direct3D layer writing only changed registers does not get in the way: the state an
+engine mesh is drawn with is the same every frame, leftovers included. So the design's
+fast path can key on (item, shaders, state hash) as planned. Next: design step 2, skipping
+the pipeline, render target update and system constants for draws whose hash matches.
