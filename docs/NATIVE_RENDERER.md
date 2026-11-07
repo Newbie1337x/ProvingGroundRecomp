@@ -464,3 +464,24 @@ The Direct3D layer writing only changed registers does not get in the way: the s
 engine mesh is drawn with is the same every frame, leftovers included. So the design's
 fast path can key on (item, shaders, state hash) as planned. Next: design step 2, skipping
 the pipeline, render target update and system constants for draws whose hash matches.
+
+## Step 9: pipeline, viewport and system constants from the entry (design step 2, 2026-11-06)
+
+`native_draw_fast` (default on, hot reload). A replayed mesh draw (step 6) whose render state
+hash equals the one its entry was made with, and whose render pass is the same, takes its
+pipeline and layout, viewport and system constants from the entry instead of configuring the
+pipeline, computing the viewport and rebuilding the system constants. Otherwise the draw
+computes them normally and the entry keeps the new results. The render target update still
+runs for every draw: it tracks EDRAM ownership per draw, and skipping it safely needs the
+render target cache to say nothing changed since its last update (next).
+
+Fixed on the way, in step 6: the system constants take each texture's swizzle, signedness and
+resolution scaling from the texture cache's bindings, which a replayed draw does not update,
+so a replayed mesh could get the previous draw's values for a slot. The entry now records
+them, and the system constants use the entry's while replaying.
+
+`--native_draw_fast_verify` computes everything normally even when the entry could be used
+and counts differences: on the skatepark route, about 700 checks per heavy frame, **0
+pipeline and 0 viewport or system constant differences**. In-run A/B with the machine free:
+heavy frames 7.03 ms off, 6.78 ms on (-0.21 ± 0.11 ms); runs while another game was running
+were too noisy to read (±1.9 ms).
