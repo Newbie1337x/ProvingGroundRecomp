@@ -1062,3 +1062,62 @@ changed during a run; the first route run of the session ended at 19 s with an a
 inside ProvingGround.exe at startup (the unreproduced startup AV seen before, cvar off), every
 later run was complete. Next: step 2/3, resolves straight from the scaled target into textures
 at its scale, so 1.5 shows its detail and the twin copies go away.
+
+### Native EDRAM steps 2/3: resolves at the target's own scale (2026-11-07)
+
+With `native_main_pass_scale_sixteenths`, the main scene's 8888 resolves into textures the game
+samples (the direct-to-texture ones, `gpu_resolve_direct_texture`) now go straight from the
+scaled render target into a texture at the same scale, with no copy into the unscaled twin.
+The post chain and the swap sample that texture, so 1.5 now shows its detail. Hot-reloadable
+`--native_resolve_own_scale` (GPU/Native, default true) turns it off (back to the twin copy).
+
+How it works (SDK):
+
+- `TextureKey` has a 6-bit `own_scale_sixteenths` (a different texture from the guest-size
+  one, host size N/16 of the guest size, in `CreateTexture` and `FindOrCreateTexture`'s
+  size limits).
+- The resolve (`VulkanRenderTargetCache::TryResolveDirectlyToTexture`, color, owner render
+  target with its own scale, global scale 1) needs the guest-size texture learned as before
+  (it may be outdated, it is not written), then copies the rectangle at the target's scale
+  into the texture at that scale: `ResolveDirectlyToOwnScaleTexture` (`vkCmdCopyImage`), or,
+  with the red/blue swap the main scene's resolves all have (`copy_dest_swap`),
+  `ResolveThroughBufferToTexture` with the own scale (image to buffer, the swap compute pass,
+  buffer to image). The range is then invalidated except for that texture, as the other direct
+  resolves do, and `TextureCache::SetOwnScaleBase` records the address.
+- `FindOrCreateTexture` for a guest key at such an address returns the texture at its own
+  scale while it is current (not memoized, since only its current state decides). Once
+  something else writes the range (a usual resolve, a CPU write) it is outdated, and the
+  guest-size texture is used (loaded from memory as before) until the next resolve straight
+  from the target. A change of address/scale bumps the lookup generation (memo and native
+  replays) and resets the bindings. The swap scales its size by N/16. Textures at an own scale
+  are never loaded from memory and never learned as direct-resolve targets.
+- Depth resolves (the shadow maps are not scaled; the depth of the main scene is resolved once
+  a frame into a float24 texture) still go through the twin.
+
+Route results (PC, same route, screenshots at 30/38/46 s): at 24 the scene is clearly sharper
+than at 16 (it was a bit softer before), colors right (the swap), character outline aligned; at
+12 it is softer as expected. Per heavy frame at 24: 8 resolves at the own scale (07656000 x5,
+085EC000 x2, 09268000, all 1280x720 with the swap), and 7 color copies + 2 depth copies left
+between the scaled targets and their twins, all transfers when other render targets take the
+EDRAM over (shadow map clears at base 0, the 1x1 pitch-1 target, a color target over the depth)
+and the depth resolve.
+
+GPU timing (`--vulkan_gpu_timing=true` only, the two gameplay windows, ms; same columns as
+step 1):
+
+| N | main scene | full-screen C0 0 | resolves | all frames | 1500+ draw frames (GPU busy) |
+|---|---|---|---|---|---|
+| 16 (off) | 0.59 / 0.61 | 0.08 / 0.10 | 0.28 / 0.27 | 2.53 / 2.73 | 2.94 / 2.80 |
+| 12 (0.75) | 0.51 / 0.50 | 0.06 / 0.07 | 0.22 / 0.20 | 2.54 / 2.62 | 2.60 / 2.44 |
+| 24 (1.5) | 0.94 / 0.93 | 0.16 / 0.18 | 0.51 / 0.48 | 3.09 / 3.19 | 4.13 / 3.78 |
+
+At 0.75 the resolves are now cheaper than at 1x (no twin copy, fewer pixels): heavy frames
+2.60/2.44 against 2.94/2.80 off (step 1: 2.90/2.72). At 1.5 the resolves cost more (the buffer
+round trip of the swap at 2.25x the pixels) and the post effects sample bigger textures:
+heavy frames 4.13/3.78 against 3.78/3.54 in step 1, the price of the detail. A swap done in a
+copy shader instead of the buffer round trip would cut part of it.
+
+Limits: depth resolves and resolves with a global draw resolution scale still go through the
+twin; memory written only into the own-scale texture is stale for the CPU, as with the other
+direct resolves (a load from memory over the range blocks the address). Next (step 4): fewer
+render pass breaks (~40 a frame).
