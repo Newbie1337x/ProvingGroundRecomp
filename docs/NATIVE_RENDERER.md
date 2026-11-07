@@ -924,3 +924,24 @@ emulator kept drawing the old data.
 - Cost of being right, A/B in one build: GPU command thread work in 1500+ draw frames
   4.80 / 4.67 ms on vs 4.26 / 4.27 ms off; the few ranges written every frame are requested
   (and their pages uploaded) each frame, ~8 draws fall back, and their pages fault again.
+
+### 3a reconsidered: what the flush actually does (2026-11-07)
+
+Read from the generated code before writing 3a:
+
+- `sub_8258BD98` (float constants) and `sub_8258B9F8` (render state ranges, fetch range 0x2280,
+  bool/loop constants) already write each run of dirty groups as one type-0 packet, the
+  float constants with VMX copies of 64-byte groups (pad dwords 0x80000000 align them). The
+  draw then writes `VGT_INDX_OFFSET` (0x2102) and a `DRAW_INDX` (with a predicated variant
+  when dev+10940 bit 0 is set, and chunks of at most 65535 indices).
+- The command processor already copies type-0 runs in bulk
+  (`VulkanCommandProcessor::WriteRegistersFromMem`: one byte-swapping copy per run for float,
+  bool/loop and fetch constants, plus the constant buffer invalidation).
+
+So a packet carrying the same constants instead of the flush saves almost nothing on either
+thread: the cost is the amount of state, which the draw needs anyway. The only form of 3a that
+saves work sends deltas (per (record, pass), only the constant groups that changed since that
+entry's last draw), but its state lives across packets, and the command buffers the game
+replays (predicated tiling executes a buffer once per tile) would apply a delta out of order.
+Not done; the per-draw cost of the command processor's native draw (~0.9 ms of the ~1.4 ms
+ceiling: replay checks, constant uploads, pre-checks, pipeline state) is the larger target.
