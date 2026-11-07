@@ -1,0 +1,177 @@
+diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
+index 832c785..b166090 100644
+--- a/include/rex/graphics/pipeline/shader/spirv_translator.h
++++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
+@@ -475,6 +475,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
+ 
+   void StartTranslation() override;
+ 
++ public:
++  // Specialization constant (uint): bit N set when all the swizzled signs of texture fetch
++  // constant N are unsigned for the pipeline, so the shader doesn't need to read and handle
++  // them at run time. 0 keeps the run-time handling.
++  static constexpr uint32_t kSpecIdTextureUnsignedMask = 0;
++
++ protected:
++
+   std::vector<uint8_t> CompleteTranslation() override;
+ 
+   void PostTranslation() override;
+@@ -884,6 +892,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+     kSystemConstantEdramBlendConstant,
+   };
+   spv::Id uniform_system_constants_;
++  // kSpecIdTextureUnsignedMask, created on the first texture fetch.
++  spv::Id spec_texture_unsigned_mask_;
+   spv::Id uniform_float_constants_;
+   spv::Id uniform_bool_loop_constants_;
+   spv::Id uniform_fetch_constants_;
+diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
+index 86240d8..5d91450 100644
+--- a/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -172,6 +172,7 @@ uint32_t SpirvShaderTranslator::GetModificationRegisterCount() const {
+ }
+ 
+ void SpirvShaderTranslator::StartTranslation() {
++  spec_texture_unsigned_mask_ = spv::NoResult;
+   // TODO(Triang3l): Logger.
+   builder_ = std::make_unique<SpirvBuilder>(features_.spirv_version, (kSpirvMagicToolId << 16) | 1,
+                                             nullptr);
+diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+index 9ce3bb4..fc978b0 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -1300,6 +1300,21 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+                                       id_vector_temp_),
+           spv::NoPrecision);
+       uint32_t swizzled_signs_word_offset = 8 * (fetch_constant_index & 3);
++      // Signs known to be all unsigned when the pipeline is created (see
++      // kSpecIdTextureUnsignedMask): a constant zero word after specialization.
++      if (spec_texture_unsigned_mask_ == spv::NoResult) {
++        spec_texture_unsigned_mask_ = builder_->makeUintConstant(0, true);
++        builder_->addDecoration(spec_texture_unsigned_mask_, spv::DecorationSpecId,
++                                int(kSpecIdTextureUnsignedMask));
++      }
++      swizzled_signs_word = builder_->createTriOp(
++          spv::OpSelect, type_uint_,
++          builder_->createBinOp(
++              spv::OpINotEqual, type_bool_,
++              builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, spec_texture_unsigned_mask_,
++                                    builder_->makeUintConstant(UINT32_C(1) << fetch_constant_index)),
++              builder_->makeUintConstant(0)),
++          builder_->makeUintConstant(0), swizzled_signs_word);
+ 
+       spv::Builder::TextureParameters texture_parameters = {};
+ 
+diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics/vulkan/pipeline_cache.h
+index 4e8fd89..f1fa6d0 100644
+--- a/include/rex/graphics/vulkan/pipeline_cache.h
++++ b/include/rex/graphics/vulkan/pipeline_cache.h
+@@ -200,8 +200,13 @@ class VulkanPipelineCache {
+     // Filled only for the attachments present in the render pass object.
+     PipelineRenderTarget render_targets[xenos::kMaxColorRenderTargets];
+ 
++    // SpirvShaderTranslator::kSpecIdTextureUnsignedMask for each shader: texture fetch
++    // constants used by the shader whose swizzled signs are all unsigned.
++    uint32_t vertex_texture_unsigned_mask;
++    uint32_t pixel_texture_unsigned_mask;
++
+     // Including all the padding, for a stable hash.
+-    static constexpr uint32_t kVersion = 0x20260228;
++    static constexpr uint32_t kVersion = 0x20261107;
+     PipelineDescription() {
+       Reset();
+     }
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+index 14d37c5..cbb0a97 100644
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -38,6 +38,7 @@
+ #include <rex/graphics/pipeline_util.h>
+ #include <rex/graphics/pipeline/shader/spirv_builder.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
++#include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/register_file.h>
+ #include <rex/graphics/registers.h>
+ #include <rex/graphics/util/draw.h>
+@@ -57,6 +58,12 @@ REXCVAR_DEFINE_INT32(
+     .range(-1, 32)
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++REXCVAR_DEFINE_BOOL(vulkan_texture_sign_specialization, true, "GPU/Vulkan",
++                    "Create pipelines for the texture signs in use (all unsigned for most "
++                    "textures), so shaders sample each texture once instead of handling every "
++                    "sign at run time")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(vulkan_tessellation_wireframe, false, "GPU/Vulkan",
+                     "Render tessellation as wireframe")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -1400,6 +1407,21 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
+ 
+   description_out.vertex_shader_hash = vertex_shader->shader().ucode_data_hash();
+   description_out.vertex_shader_modification = vertex_shader->modification();
++  if (REXCVAR_GET(vulkan_texture_sign_specialization)) {
++    auto unsigned_mask = [&regs](const Shader& shader) {
++      uint32_t mask = 0;
++      for (const Shader::TextureBinding& binding : shader.texture_bindings()) {
++        if (!texture_util::SwizzleSigns(regs.GetTextureFetch(binding.fetch_constant))) {
++          mask |= UINT32_C(1) << binding.fetch_constant;
++        }
++      }
++      return mask;
++    };
++    description_out.vertex_texture_unsigned_mask = unsigned_mask(vertex_shader->shader());
++    if (pixel_shader) {
++      description_out.pixel_texture_unsigned_mask = unsigned_mask(pixel_shader->shader());
++    }
++  }
+   SpirvShaderTranslator::Modification vertex_shader_modification(
+       description_out.vertex_shader_modification);
+   Shader::HostVertexShaderType host_vertex_shader_type =
+@@ -3075,6 +3097,14 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+   std::array<VkPipelineShaderStageCreateInfo, 5> shader_stages;
+   uint32_t shader_stage_count = 0;
+ 
++  // Texture sign specialization of the guest shaders.
++  static const VkSpecializationMapEntry texture_unsigned_mask_entry = {
++      SpirvShaderTranslator::kSpecIdTextureUnsignedMask, 0, sizeof(uint32_t)};
++  VkSpecializationInfo vertex_specialization = {1, &texture_unsigned_mask_entry, sizeof(uint32_t),
++                                                &description.vertex_texture_unsigned_mask};
++  VkSpecializationInfo pixel_specialization = {1, &texture_unsigned_mask_entry, sizeof(uint32_t),
++                                               &description.pixel_texture_unsigned_mask};
++
+   // Vertex or tessellation evaluation shader (plus helper stages for tessellation).
+   assert_true(creation_arguments.vertex_shader->is_translated());
+   if (!creation_arguments.vertex_shader->is_valid()) {
+@@ -3114,7 +3144,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+     shader_stage_tess_eval.module = creation_arguments.vertex_shader->shader_module();
+     assert_true(shader_stage_tess_eval.module != VK_NULL_HANDLE);
+     shader_stage_tess_eval.pName = "main";
+-    shader_stage_tess_eval.pSpecializationInfo = nullptr;
++    shader_stage_tess_eval.pSpecializationInfo =
++        description.vertex_texture_unsigned_mask ? &vertex_specialization : nullptr;
+   } else {
+     VkPipelineShaderStageCreateInfo& shader_stage_vertex = shader_stages[shader_stage_count++];
+     shader_stage_vertex.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+@@ -3124,7 +3155,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+     shader_stage_vertex.module = creation_arguments.vertex_shader->shader_module();
+     assert_true(shader_stage_vertex.module != VK_NULL_HANDLE);
+     shader_stage_vertex.pName = "main";
+-    shader_stage_vertex.pSpecializationInfo = nullptr;
++    shader_stage_vertex.pSpecializationInfo =
++        description.vertex_texture_unsigned_mask ? &vertex_specialization : nullptr;
+   }
+   // Geometry shader.
+   if (creation_arguments.geometry_shader != VK_NULL_HANDLE) {
+@@ -3158,6 +3190,9 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+     }
+     shader_stage_fragment.module = creation_arguments.pixel_shader->shader_module();
+     assert_true(shader_stage_fragment.module != VK_NULL_HANDLE);
++    if (description.pixel_texture_unsigned_mask) {
++      shader_stage_fragment.pSpecializationInfo = &pixel_specialization;
++    }
+   } else {
+     if (edram_fragment_shader_interlock) {
+       shader_stage_fragment.module = depth_only_fragment_shader_;
