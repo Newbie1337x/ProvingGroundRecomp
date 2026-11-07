@@ -47,7 +47,15 @@ public class SetupActivity extends Activity {
             openPicker();
             return;
         }
-        showScreen(currentGameFolder());
+        File game = currentGameFolder();
+        // `adb shell am start -n <package>/.SetupActivity --ez autostart true` starts the game
+        // without a touch (for testing over adb; some phones ignore injected touches).
+        if (game != null && getIntent().getBooleanExtra("autostart", false)) {
+            getIntent().removeExtra("autostart");
+            startGame(game);
+            return;
+        }
+        showScreen(game);
     }
 
     // --- Folder detection ---

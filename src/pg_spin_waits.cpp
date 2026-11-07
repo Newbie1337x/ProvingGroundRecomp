@@ -33,6 +33,17 @@ REXCVAR_DEFINE_BOOL(sleep_in_spin_waits,
                     "Sleep instead of spinning while the game's main and render threads wait "
                     "for each other (keeps phones cooler)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(swap_waits_for_new_frame,
+#if REX_PLATFORM_ANDROID
+                    true,
+#else
+                    false,
+#endif
+                    "Perf",
+                    "After a swap, the render thread waits for the main loop's next frame "
+                    "instead of drawing the last one again (when the main loop is slower than "
+                    "the render thread, the repeated frames took CPU and GPU time from it)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(log_frame_stats, false, "Perf",
                     "Log the frame time distribution and the frame threads' waits every 5 "
                     "seconds")
@@ -71,6 +82,9 @@ uint64_t LoadU64(const uint8_t* base, uint32_t address) {
 // Time spent in each wait since the last frame stats line, in nanoseconds.
 std::atomic<int64_t> hand_over_wait_ns{0};
 std::atomic<int64_t> tick_wait_ns{0};
+std::atomic<uint32_t> main_loop_frames{0};
+// Main loop frames handed to the render thread since start (never reset).
+std::atomic<uint64_t> main_loop_frame_count{0};
 
 // Waits until done() is true, or up to kMaxWait.
 template <typename Done>
@@ -104,6 +118,38 @@ float LoadGuestFloat(const uint8_t* base, uint32_t address) {
 
 namespace pg {
 
+// Called after each swap. Without a frame rate limit the render thread presented the main
+// loop's last frame again whenever the main loop was slower: on a phone the counter showed
+// 80-100 FPS while the game logic ran at 20-30 Hz, and the repeated frames competed with it for
+// the CPU and GPU. Waits (sleeping) until the main loop hands over its next frame, for at most
+// twice its recent frame time, so loading screens, which the render thread animates without
+// the main loop, keep moving.
+void WaitForNewMainLoopFrame() {
+  // last_count: the main loop frames counted when the render thread started its last frame.
+  static uint64_t last_count = 0;
+  static Clock::time_point last_new_frame = Clock::now();
+  static double frame_interval_s = 1.0 / 30.0;
+  uint64_t count = main_loop_frame_count.load(std::memory_order_acquire);
+  if (count == last_count && REXCVAR_GET(swap_waits_for_new_frame) &&
+      Clock::now() - last_new_frame < std::chrono::milliseconds(250)) {
+    // No new frame since the last one started: wait for it instead of drawing that one again.
+    const auto deadline = last_new_frame + std::chrono::duration_cast<Clock::duration>(
+                                               std::chrono::duration<double>(2.0 * frame_interval_s));
+    while ((count = main_loop_frame_count.load(std::memory_order_acquire)) == last_count &&
+           Clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+  }
+  if (count != last_count) {
+    const auto now = Clock::now();
+    const double since = std::chrono::duration<double>(now - last_new_frame).count();
+    frame_interval_s =
+        std::clamp(0.8 * frame_interval_s + 0.2 * since / double(count - last_count), 0.002, 0.1);
+    last_count = count;
+    last_new_frame = now;
+  }
+}
+
 // Called after each swap: every 5 seconds logs the frame time distribution, how long the two
 // frame threads waited for each other, and the engine's own frame time against the real one
 // (below 100% the game runs slower than real time).
@@ -133,11 +179,12 @@ void LogFrameStats(const uint8_t* base) {
   REXLOG_INFO(
       "Frame stats: {:.1f} fps; frame ms median {:.1f} p90 {:.1f} p99 {:.1f} max {:.1f}; "
       "over 1.5x median {} ({:.0f}%); waits per frame: main loop {:.1f} ms, swap tick {:.1f} "
-      "ms; engine time {:.0f}% of real",
+      "ms; engine time {:.0f}% of real; game logic {:.1f} fps",
       frames / window_s, median, at(0.9), at(0.99), sorted.back(), long_frames,
       100.0 * double(long_frames) / frames,
       double(hand_over_wait_ns.exchange(0)) / 1e6 / frames,
-      double(tick_wait_ns.exchange(0)) / 1e6 / frames, 100.0 * engine_s / window_s);
+      double(tick_wait_ns.exchange(0)) / 1e6 / frames, 100.0 * engine_s / window_s,
+      double(main_loop_frames.exchange(0, std::memory_order_relaxed)) / window_s);
   frame_ms.clear();
   engine_s = 0.0;
   window_start = now;
@@ -149,6 +196,10 @@ extern "C" void __imp__sub_824852F8(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_824852F8(PPCContext& __restrict ctx, uint8_t* base) {
   const bool from_main_loop = uint32_t(ctx.lr) == kMainLoopHandOverCall;
   __imp__sub_824852F8(ctx, base);
+  if (from_main_loop) {
+    main_loop_frames.fetch_add(1, std::memory_order_relaxed);
+    main_loop_frame_count.fetch_add(1, std::memory_order_release);
+  }
   if (!from_main_loop || !REXCVAR_GET(sleep_in_spin_waits) ||
       LoadU32(base, kMainLoopIntervalAddress) != 0) {
     return;

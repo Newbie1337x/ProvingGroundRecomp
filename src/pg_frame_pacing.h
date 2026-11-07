@@ -16,5 +16,7 @@ void ApplyFrameRateLimit();
 // With log_frame_stats, logs frame times and waits every 5 seconds; called after each swap
 // (see pg_spin_waits.cpp).
 void LogFrameStats(const uint8_t* base);
+// After each swap: waits for the main loop's next frame (see pg_spin_waits.cpp).
+void WaitForNewMainLoopFrame();
 
 }  // namespace pg

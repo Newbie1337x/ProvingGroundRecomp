@@ -154,6 +154,7 @@ extern "C" void sub_824853A8(PPCContext& __restrict ctx, uint8_t* base) {
   in_swap = true;
   __imp__sub_824853A8(ctx, base);
   in_swap = false;
+  pg::WaitForNewMainLoopFrame();
   LimitFrameRate();
   CountFrame(Clock::now());
   pg::LogFrameStats(base);
