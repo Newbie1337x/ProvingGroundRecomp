@@ -945,3 +945,22 @@ entry's last draw), but its state lives across packets, and the command buffers 
 replays (predicated tiling executes a buffer once per tile) would apply a delta out of order.
 Not done; the per-draw cost of the command processor's native draw (~0.9 ms of the ~1.4 ms
 ceiling: replay checks, constant uploads, pre-checks, pipeline state) is the larger target.
+
+## Own shaders: where the GPU time goes (2026-11-07)
+
+`--vulkan_gpu_timing_shaders` (with `--vulkan_gpu_timing`): a timestamp whenever the draws'
+vertex/pixel shader pair changes, the time logged per pair of ucode hashes (top 24 per 5 s
+window). Route at 1440p (scale 2x):
+
+- Frames with 1500+ draws: ~6.0 ms GPU, but the command thread works ~7.3-7.7 ms, so they are
+  CPU-bound; faster shaders would not show there. The most expensive pair is 0.27 ms
+  (vs 281EBD690A5AC512 ps CD4D4F0F2DD1C86C, 15 draw runs a frame), then four at ~0.13-0.18 ms;
+  the top 24 add up to ~2.7 ms, the rest is a long tail.
+- All frames: ~3.7-5.2 ms GPU in the busy windows (mean ~250 fps, GPU-bound), of which
+  **resolves ~0.7-1.4 ms** (20-36 a frame) and the swap's output copy 0.13 ms; no shader pair
+  above 0.12 ms.
+
+So no shader is worth replacing alone: writing the top ten by hand would take at most ~1 ms
+off heavy frames (CPU-bound anyway) and less than 0.4 ms off the others. The GPU-side pieces
+that are large are the resolves (EDRAM model; the direct paths and owning the main pass, 3c)
+and, on the CPU side, the command processor's per-draw cost.
