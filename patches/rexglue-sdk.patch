@@ -8089,7 +8089,7 @@ index cdbedae..cac3799 100644
 +
  }  // namespace rex::graphics::vulkan
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
-index 0298f06..0284e7f 100644
+index 0298f06..d0ee528 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
 +++ b/src/graphics/vulkan/render_target_cache.cpp
 @@ -14,6 +14,8 @@
@@ -8117,7 +8117,7 @@ index 0298f06..0284e7f 100644
  REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
                        "Vulkan render target implementation path")
      .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-@@ -1124,6 +1135,117 @@ void VulkanRenderTargetCache::EndSubmission() {
+@@ -1124,6 +1135,122 @@ void VulkanRenderTargetCache::EndSubmission() {
    }
  }
  
@@ -8166,8 +8166,13 @@ index 0298f06..0284e7f 100644
 +                     xenos::ColorRenderTargetFormat::k_8_8_8_8) {
 +    return false;
 +  }
-+  if (is_depth && GetDepthVulkanFormat(xenos::DepthRenderTargetFormat::kD24FS8) !=
-+                      VK_FORMAT_D32_SFLOAT_S8_UINT) {
++  // The texture must get the float24 value the usual resolve would write: only when the host
++  // depth is already float24-exact (converted in the pixel shader). Otherwise the copy would
++  // give the shadow test the unconverted float32 depth, and near-equal compares (characters
++  // shadowing themselves) flicker.
++  if (is_depth && (GetDepthVulkanFormat(xenos::DepthRenderTargetFormat::kD24FS8) !=
++                       VK_FORMAT_D32_SFLOAT_S8_UINT ||
++                   !depth_float24_convert_in_pixel_shader())) {
 +    return false;
 +  }
 +  const reg::RB_COPY_DEST_INFO dest_info = resolve_info.copy_dest_info;
@@ -8235,7 +8240,7 @@ index 0298f06..0284e7f 100644
  bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                                        VulkanSharedMemory& shared_memory,
                                        VulkanTextureCache& texture_cache,
-@@ -1144,6 +1266,14 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1144,6 +1271,14 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
    if (!resolve_info.coordinate_info.width_div_8 || !resolve_info.height_div_8) {
      return true;
    }
@@ -8250,7 +8255,7 @@ index 0298f06..0284e7f 100644
  
    const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-@@ -1377,6 +1507,45 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1377,6 +1512,45 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
    return copied && cleared;
  }
  
@@ -8296,7 +8301,7 @@ index 0298f06..0284e7f 100644
  bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
                                       reg::RB_DEPTHCONTROL normalized_depth_control,
                                       uint32_t normalized_color_mask, const Shader& vertex_shader) {
-@@ -1397,8 +1566,64 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+@@ -1397,8 +1571,64 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
        RenderTarget* const* depth_and_color_render_targets =
            last_update_accumulated_render_targets();
  
@@ -8362,7 +8367,7 @@ index 0298f06..0284e7f 100644
  
        if (depth_and_color_render_targets[0]) {
          render_pass_key.depth_and_color_used |= 1 << 0;
-@@ -1890,7 +2115,8 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
+@@ -1890,7 +2120,8 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
    if (key.is_depth) {
      image_create_info.format = GetDepthVulkanFormat(key.GetDepthFormat());
      transfer_format = image_create_info.format;
@@ -8372,7 +8377,7 @@ index 0298f06..0284e7f 100644
    } else {
      xenos::ColorRenderTargetFormat color_format = key.GetColorFormat();
      image_create_info.format = GetColorVulkanFormat(color_format);
-@@ -1899,7 +2125,8 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
+@@ -1899,7 +2130,8 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
      if (image_create_info.format != transfer_format || is_srgb_view_needed) {
        image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
      }
@@ -8382,7 +8387,7 @@ index 0298f06..0284e7f 100644
    }
    if (image_create_info.format == VK_FORMAT_UNDEFINED) {
      REXGPU_ERROR("VulkanRenderTargetCache: Unknown {} render target format {}",
-@@ -4546,6 +4773,53 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
+@@ -4546,6 +4778,53 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
    return transfer_pipelines_.emplace(key, pipelines).first->second.data();
  }
  
@@ -8436,7 +8441,7 @@ index 0298f06..0284e7f 100644
  void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
      uint32_t render_target_count, RenderTarget* const* render_targets,
      const std::vector<Transfer>* render_target_transfers,
-@@ -4768,8 +5042,38 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+@@ -4768,8 +5047,38 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
    TransferAddressConstant last_host_depth_address_constant;
    TransferAddressConstant last_address_constant;
  

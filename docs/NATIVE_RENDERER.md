@@ -740,3 +740,11 @@ heavy frame. What is left of the EDRAM emulation in the route: ~10 small transfe
 (~0.12 ms GPU, the shadow map's first draw over the main pass's EDRAM and the luminance
 chain), the 1x1 and 0727D000 resolves (fall back, read through another texture), and the
 emulated path for anything the checks above reject.
+
+Correction after testing: people flickered with the shadow maps copied directly. By default
+(`depth_float24_convert_in_pixel_shader` off) host depth is plain float32 and the usual resolve
+converts it to float24; the direct copy gave the shadow test the unconverted value, and the
+near-equal compares of characters shadowing themselves flip from frame to frame. The depth
+direct path now runs only when the host depth is already float24-exact (that cvar on). To get
+the -0.8 ms back by default, the copy needs the float32 -> float24 (truncating, or rounding with
+depth_float24_round) -> float32 conversion in a small compute pass over the scratch buffer.
