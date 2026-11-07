@@ -597,3 +597,49 @@ the static vertex ranges, and the entry keeps the shared memory buffer and the i
 Not learnable: ~60-80 -> ~15-25 per frame; verify still finds no differences; in-run A/B of
 native draws on/off: heavy frames -1.52 ± 0.43 ms (busy machine, 10.65 -> 9.17 ms), up from
 -0.65 ms before.
+
+## Native render targets: design (2026-11-06)
+
+### What the frame does today
+
+From `--vulkan_gpu_timing --vulkan_gpu_timing_min_draws=1500 --vulkan_log_frame_sequence=1`
+(heavy skatepark frame, ~1500 draws): occlusion points, two shadow depth maps (pitch 13 and 7
+tiles), a small 320-wide pass, the main 1280x720 pass (color C0 at tile 0, depth D0 at 720),
+then the post-processing chain: ~25 resolves (bloom downsamples into 08D68000, 08D62000,
+08D5D000..., scene color into 07656000 / 085EC000) with small draws between them. Every
+target is 1x, but each pass started with Direct3D's clear drawn on a 4x surface of half the
+size (the Xbox way of clearing faster). The render target cache then made a 4x render target
+and copied the EDRAM 1x -> 4x -> 1x around every clear. In heavy frames (busy machine) the
+transfers were ~1 ms of GPU, the resolves ~0.9 ms, out of ~7.4 ms for the main scene.
+
+### Decision
+
+Native render targets are reached in steps, with the emulated EDRAM (the render target cache)
+kept as the fallback for anything not recognized:
+
+1. Clears made the native way: the 4x clears are drawn as 1x (done, below).
+2. No EDRAM copies into a render target that the next draw overwrites whole (the shadow maps
+   and the small pass inherit the main pass's EDRAM area and copy it, then clear it).
+3. Resolves become direct textures: when a texture is fetched from a resolve destination that
+   no one wrote since, sample the render target image itself (format, size and swizzle known)
+   instead of copying it to guest memory and loading it back. The post-processing chain is
+   almost all of this.
+4. The main pass and the shadow maps in our own Vulkan images, with the engine's own clears and
+   resolves hooked like Engine_DrawMesh, so the EDRAM model is no longer needed for them.
+
+Steps 1-3 stay inside the SDK's render target cache and are checkable against it (verify
+modes, captures); step 4 is the end state.
+
+### Step 1: 4x clears drawn as 1x
+
+`gpu_msaa_clear_as_1x` (on by default): a draw with Direct3D's clear vertex shader (ucode
+0A6D1DD7767FDF27: screen-space rectangle, color from the vertices) or a draw that writes
+nothing, on a 4x surface, is drawn on the 1x surface of the same EDRAM: surface pitch and HiZ
+pitch doubled, MSAA 1x, the viewport transform enabled with scale 2 and offset 2*offset+0.5
+(pixel' = 2 * (x * scale + offset + half pixel)), scissors doubled. The registers are changed
+for that draw only and restored after. Every sample of a cleared pixel has the same value, so
+the EDRAM contents are the same. Result: the 4x render targets and the 1x <-> 4x copies are
+gone from the frame (~2.5 clears per frame); in-run A/B -0.28 ± 0.19 ms on heavy frames that
+are CPU bound (the GPU saving is larger than what shows in frame time); shadows and lighting
+unchanged in the captures. A guest access violation at startup was seen once in six runs with
+it on and not reproduced since.
