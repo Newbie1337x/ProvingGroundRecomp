@@ -265,3 +265,46 @@ Follow-up (same day): the registry keeps a bitmap of the 4 KB pages any range to
 lookup for dynamic data is a bit test, and a static index buffer skips the lookup while no
 range was replaced. Uncapped heavy frames: 6.10-6.16 ms. Tried and dropped: keeping a texture
 binding when the guest writes the same fetch constant again (+0.29 ± 0.26 ms, no gain).
+
+Also tried and dropped (same day), each with an in-run A/B: a material binding cache that
+keeps what every texture fetch constant resolved to (it served about 1700 constants a heavy
+frame, nearly all of them, and changed nothing: +0.015 ± 0.21 ms), and a per-submission cache
+of texture descriptor sets by their image views and samplers (about 80 of 480 sets a frame
+came from it; -0.38 ± 0.33 ms in one run, +0.38 ± 0.13 ms in another). Parsing constants and
+writing descriptors is not what costs: the remaining CPU, about 3.5 µs a draw, is spread over
+the whole emulated path. Big gains from here need draws that skip that path.
+
+## Step 5: does each mesh always draw the same way? (2026-11-06)
+
+Before drawing meshes outside the emulated path, their state has to be something that can be
+built once. `--native_draw_census` (logged with `--vulkan_gpu_timing`) records, for every
+draw whose vertex buffer is a registered engine mesh, the distinct states it is drawn with:
+vertex and pixel shader, Vulkan pipeline and a hash of the used texture fetch constants. A
+"draw item" is a vertex buffer, index buffer and index count.
+
+On the skatepark route (whole run, menus included, about 3200 items):
+
+- 65% of the items are always drawn with one state, 30% with two, 5% with three or four.
+- The shader pair and the pipeline always change together, and items with two states are the
+  most drawn: the same mesh in two passes (a depth or shadow pass and the color pass).
+- **Per shader pair, the pipeline and the textures never change for 99.4% of the items (97%
+  of their draws).**
+
+So a mesh in a pass is a fixed thing: its pipeline, texture descriptor set, vertex buffer and
+converted index buffer can be made once and kept. What changes per draw are the constants
+(matrices, per-object values), which the engine knows.
+
+### Plan for native draws, easiest first
+
+1. **Replay a known item inside the command processor.** When a draw's item and shader pair
+   match a kept entry, and a cheap check (render pass, used fetch constants, the render state
+   registers the pipeline depends on) agrees, bind the kept pipeline and descriptor sets and
+   skip the texture, pipeline and binding work. The constants are still uploaded as now. This
+   stays inside the emulator, so a failed check just falls back.
+2. **Constants from the engine.** The hook reads each mesh's matrices and material values
+   from the record instead of the emulator collecting the guest constant registers.
+3. **Shaders ahead of time.** The translated SPIR-V is already cached by the emulator per
+   shader pair; the native path would load those for each kept item at level load.
+4. **Drawing straight into the current render target.** Issuing the engine's draws from the
+   hook, not from the guest command stream. This needs an SDK design decision on how native
+   draws share the EDRAM render target with the emulator.
