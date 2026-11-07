@@ -849,3 +849,22 @@ reset after a bypassed mesh.
 Expected: 3a+3b take roughly 1-1.5 ms off each thread in heavy frames, about 1.3x on heavy
 frames (not 2x: the command thread still issues every draw, and the waits between the threads
 remain). 3c is a GPU-side gain, at high resolutions.
+
+### Phase 3 ceilings, measured (2026-11-07)
+
+Measurement-only cvars: `native_experiment_drop_mesh_draws` (game side: Engine_DrawMesh's
+DrawIndexedVertices is not called, so no flush, no packets, no draw) and
+`native_experiment_drop_marked_draws` (SDK: the command processor drops marked draws; the game
+still flushes and the packets are still parsed). Route, 720p, uncapped, frame time p95:
+
+| | p95 | p99 | mean fps |
+| --- | --- | --- | --- |
+| base (two runs) | 5.00 / 5.19 ms | 6.25 / 6.64 ms | 560 / 528 |
+| command processor drops mesh draws | 3.71 | 4.81 | 829 |
+| game drops mesh draws (no flush) | 3.15 | 4.47 | 916 |
+| meshes skipped entirely | 2.85 | 3.24 | 1125 |
+
+So in a heavy frame the meshes cost ~1.4 ms in the command processor's (native) draws and the
+GPU, ~0.55 ms in Direct3D's flush and the packets it makes (the most 3a can save, less the
+packet it writes instead), and ~0.3 ms (p99 ~1.2 ms) in the engine's own mesh code and setters
+(3b). The largest piece is the command processor's per-draw cost of native draws.

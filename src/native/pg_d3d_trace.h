@@ -12,7 +12,8 @@ namespace pg::native {
 void OnSwapForTrace();
 
 // Called before D3DDevice_DrawIndexedVertices (sub_82578638): inside Engine_DrawMesh, writes
-// the engine bypass marker when native_draw_markers is on. In pg_engine_hooks.cpp.
-void BeforeDrawIndexedVertices(PPCContext& ctx, uint8_t* base);
+// the engine bypass marker when native_draw_markers is on. In pg_engine_hooks.cpp. Returns true
+// when the draw was replaced and the original must not run.
+bool BeforeDrawIndexedVertices(PPCContext& ctx, uint8_t* base);
 
 }  // namespace pg::native

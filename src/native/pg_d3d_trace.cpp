@@ -249,7 +249,7 @@ void OnSwapForTrace() {
       SampleArgs(k_##name, ctx, base);                                             \
     }                                                                              \
     if constexpr (k_##name == k_sub_82578638) {                                    \
-      pg::native::BeforeDrawIndexedVertices(ctx, base);                            \
+      if (pg::native::BeforeDrawIndexedVertices(ctx, base)) return;                \
     }                                                                              \
     __imp__##name(ctx, base);                                                       \
   }

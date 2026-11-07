@@ -59,6 +59,9 @@ REXCVAR_DEFINE_BOOL(native_static_buffers, true, "Perf",
                     "Tell the GPU emulation that the vertex data of the engine's meshes is "
                     "static (see rex/graphics/native_ranges.h)");
 
+REXCVAR_DEFINE_BOOL(native_experiment_drop_mesh_draws, false, "Perf",
+                    "Measurement only: drop the Direct3D draws of Engine_DrawMesh (the engine "
+                    "still runs; the meshes are missing from the image)");
 REXCVAR_DEFINE_BOOL(native_draw_markers, true, "Perf",
                     "Write a marker packet (type-3 NOP: magic, mesh record, pass) into the "
                     "Direct3D command buffer before each draw of Engine_DrawMesh")
@@ -380,9 +383,9 @@ namespace pg::native {
 // Engine_DrawMesh, write the marker into the device's command buffer the way the draw writes
 // its own packets: dev+48 is the last written dword (stores are pre-increment), dev+56 the
 // limit past which sub_8257B2D8(dev) makes room and returns the new last written dword.
-void BeforeDrawIndexedVertices(PPCContext& ctx, uint8_t* base) {
+bool BeforeDrawIndexedVertices(PPCContext& ctx, uint8_t* base) {
   const uint32_t record = t_mesh_record;
-  if (!record) return;
+  if (!record) return false;
   const uint32_t pass = t_mesh_pass++;
   const uint32_t device = ctx.r3.u32;
   if (REXCVAR_GET(native_mesh_stats)) {
@@ -402,7 +405,9 @@ void BeforeDrawIndexedVertices(PPCContext& ctx, uint8_t* base) {
     }
     if (!other) ++g_stats.only_constants;
   }
-  if (!REXCVAR_GET(native_draw_markers)) return;
+  // Measurement only: the meshes' draws are dropped (the dirty state stays for the next draw).
+  if (REXCVAR_GET(native_experiment_drop_mesh_draws)) return true;
+  if (!REXCVAR_GET(native_draw_markers)) return false;
   uint32_t ptr = LoadBigU32(base, device + 48);
   if (ptr > LoadBigU32(base, device + 56)) {
     PPCContext call = ctx;
@@ -415,6 +420,7 @@ void BeforeDrawIndexedVertices(PPCContext& ctx, uint8_t* base) {
   StoreBigU32(base, ptr += 4, record);
   StoreBigU32(base, ptr += 4, pass);
   StoreBigU32(base, device + 48, ptr);
+  return false;
 }
 
 void OnSwapForEngineHooks() {
