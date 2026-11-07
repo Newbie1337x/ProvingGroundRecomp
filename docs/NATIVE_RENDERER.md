@@ -748,3 +748,20 @@ near-equal compares of characters shadowing themselves flip from frame to frame.
 direct path now runs only when the host depth is already float24-exact (that cvar on). To get
 the -0.8 ms back by default, the copy needs the float32 -> float24 (truncating, or rounding with
 depth_float24_round) -> float32 conversion in a small compute pass over the scratch buffer.
+
+Follow-up (shadow maps back on by default, plus robustness):
+
+- Depth goes through a small compute pass over the scratch buffer: float32 -> float24 (truncated,
+  or rounded with depth_float24_round, as xenos::Float32To20e4) -> float32, the value the usual
+  resolve and k_24_8_FLOAT load give. The depth direct path runs by default again.
+- Color resolves with copy_dest_swap no longer keep red/blue swapped in the image with a view
+  swizzle (native replays cache views, so a view change could be missed); they go through the
+  same buffer pass, which swaps the bytes, so the image holds exactly what a load would give.
+  Resolves without the swap stay a single vkCmdCopyImage.
+- After a direct resolve, the other textures over the range are invalidated as a resolve would
+  (`TextureCache::InvalidateRangeExcept`): a different format/size of the same memory would
+  otherwise never reload; its reload then puts the address on the usual path.
+- `gpu_resolve_direct_texture_color` / `_depth` select the two parts (both default on).
+- Checked with the user watching runs: no flicker in normal play. The NPC outline that pulses
+  is the game's own effect (it looked like a regression in A/B runs).
+- A/B (whole direct path, loaded machine): -0.38 +- 0.29 and -0.21 +- 0.17 ms per heavy frame.
