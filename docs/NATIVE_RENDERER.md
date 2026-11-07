@@ -778,3 +778,20 @@ map's transfer went 0.031 -> 0.007 ms (what is left is the partial tile column p
 Still on the emulated path (~0.09 ms GPU per heavy frame): the full-screen passes over memory
 another target owned (C0 <- D0, the 1-3 tile luminance chain C0 1440 pitch 1 <-> pitch 4),
 partial tiles past the cleared rectangles, and the two fallback resolves.
+
+### Resolution scaling
+
+Steps 2-4 were limited to `resolution_scale` 1. Now:
+- Clears as render target clears pass the draw resolution scale in the synthetic ResolveInfo;
+  the rectangle stays in guest pixels and the cache scales it, as for the guest's resolve clears.
+- Direct resolves learn the textures the game samples at the current scale (`scaled_resolve`
+  keys when scaled), copy from the render target at source x/y times the scale, with the
+  texture's scaled size, and mark the range like the usual resolve (`MarkRangeAsResolved`:
+  scaled pages, other textures over the range invalidated).
+- The half-pixel offset gap (`resolve_resolution_scale_fill_half_pixel_offset`: scale / 2 host
+  columns/rows on the left/top of the resolve region get the first covered column/row) is
+  copied the same way: separate copy regions, none written twice. Only scales 1, 2 and 4 (where
+  that count is unambiguous) take the direct path; scale 3 resolves the usual way.
+- A/B at 1440p (`--resolution_scale=2`, unloaded machine, separate runs): heavy frames
+  7.31 -> 6.45 ms (137 -> 155 fps), mean 277 -> 299 fps. GPU timing: resolved-target texture
+  loads 0.98 -> 0.01 ms, transfers 0.31 -> ~0.07 ms; the clears now count under resolves.
