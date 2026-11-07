@@ -964,3 +964,38 @@ So no shader is worth replacing alone: writing the top ten by hand would take at
 off heavy frames (CPU-bound anyway) and less than 0.4 ms off the others. The GPU-side pieces
 that are large are the resolves (EDRAM model; the direct paths and owning the main pass, 3c)
 and, on the CPU side, the command processor's per-draw cost.
+
+## Native EDRAM: design (2026-11-07)
+
+Measured on a Poco F6 (Adreno 735): gameplay is GPU-bound at 720p, 27-36 ms of GPU a frame:
+the main scene (D0 base 720 + C0 base 0, pitch 16) ~10.9 ms in ~10 render pass segments,
+~48 resolves 5.6 ms, ~85 render pass begins a frame. On a tiled GPU every break stores and
+reloads the framebuffer. The render passes end at texture loads in the middle of the scene,
+at resolves, and at shared memory uploads (frame sequence of the skatepark route on PC).
+
+Goal: the game's render targets become host images of our own size and lifetime, not EDRAM
+ranges at an integer scale. Where the scale lives today (Vulkan only): ~150 uses of
+`draw_resolution_scale_x/y` in the render target cache (image sizes, transfers, dumps,
+clears), the command processor (viewport, scissor, system constants), the texture cache
+(scaled resolve buffer, resolved texture sizes), `draw_util` (viewport, resolve info) and the
+SPIR-V translator (pixel position), plus the precompiled resolve and transfer shaders, all
+integer.
+
+Steps, each testable on PC (route + screenshots) before the next:
+
+1. **Per-render-target scale.** A render target key gets its own scale (n/16, so an 80x16
+   EDRAM tile is still whole host pixels: 0.5 = 40x8, 0.75 = 60x12, 1.5 = 120x24). Only the
+   main scene's key (1280x720, the most expensive) uses a scale other than the global one;
+   draws into it get its viewport, scissor and pixel-position constants.
+2. **Resolves and transfers out of it by blit.** Resolves from that target go through the
+   direct-to-texture path with a scaled `vkCmdBlitImage`; transfers to or from targets with
+   another scale are blits instead of the EDRAM sample-mapping shaders. Anything not covered
+   falls back to rendering that target at the global scale (it is recreated).
+3. **Resolved textures at the target's scale.** The scaled resolve buffer and texture keys
+   carry the scale of the target they came from, so the post chain samples them at their own
+   size.
+4. **Fewer render pass breaks.** Texture loads found during the scene are done before the
+   next render pass where possible (the loads of a submission's first draws are already known
+   when it begins), and shared memory uploads of a frame are batched.
+
+Not started yet; step 1 is the next change.
