@@ -347,3 +347,96 @@ with one memcpy per run. The bytes uploaded are the same. In-run A/B, uncapped h
 
 Reading constants straight from the engine waits for step 4 (native draws), where it replaces
 the register writes altogether.
+
+## Design: native draws (plan step 4, 2026-11-06)
+
+### Where the time is
+
+Heavy frames are bound by the GPU command thread: it handles about 1700 draws in ~5.6 ms,
+about 3.3 µs a draw, of which engine meshes are 50 to 70%. Step 6 already skips the sampler
+and texture work for known meshes. What every draw still pays (`--vulkan_gpu_timing`
+sections, roughly in order of cost): bindings (constants and descriptor sets), render target
+update, vertex buffer checks, primitive processing, system constants, pipeline lookup,
+viewport and dynamic state, shader translation lookups, then the draw. For a mesh whose state
+is known (99.4% of mesh items are, per pass, step 5) almost all of that recomputes the same
+answer every frame.
+
+### Where a native draw is issued
+
+The engine's draws and the emulated ones must reach Vulkan in the order the game issued
+them: they share the render target, blending and depth with everything around them, and
+render targets live in EDRAM, which the emulator's render target cache owns. Drawing from the
+hook on the game thread, straight into Vulkan, would race the command thread and break that.
+So native draws are issued **on the command thread, in stream order, into the render pass the
+emulator has open**. That answers the EDRAM question by construction: a native draw is just a
+cheaper way to issue a draw the emulator was about to issue, into the same render target.
+
+Two ways to get there:
+
+- **A. Fast path in the command processor (recommended first).** The game runs unchanged; the
+  command processor recognizes a known mesh draw and issues it from kept state, skipping
+  nearly all of `IssueDraw`. Any failed check falls back to the normal path for that draw,
+  so it can't leave the frame wrong.
+- **B. Engine bypass.** The hook skips `Engine_DrawMesh`'s own Direct3D work and writes one
+  marker packet into the command buffer instead; the command processor draws from it. This
+  also saves the game thread's time, but cannot fall back on the command thread (the
+  engine's packets are gone), needs the engine's Direct3D state shadow kept in step, and
+  needs reverse engineering of how the engine writes its command buffer. Worth it only once
+  the game thread, not the command thread, sets the frame time.
+
+### A in detail
+
+**Draw signature.** Each draw's state is the registers the game wrote. The command processor
+keeps a running 64-bit hash of all render state registers (everything except float, bool,
+loop and fetch constants, and a short list of registers that change every draw without
+affecting rendering, found by measurement): `WriteRegister` updates it in O(1) by hashing out
+the old (register, value) and hashing in the new one. Two draws with the same hash, shaders
+and used fetch constants have the same pipeline, render target setup, viewport, system
+constants and textures.
+
+**Kept draw entry** (per mesh item and shader translations, extending step 6's entry):
+the state hash it was made for, the pipeline and pipeline layout, the render pass and
+framebuffer, the persistent converted index buffer and its offset, the host draw parameters
+(primitive type, index count, base vertex), the system constants bytes, the dynamic state
+(viewport, scissor, depth bias, stencil), and step 6's textures, samplers and image infos.
+
+**Checks before a native draw** (all cheap compares):
+1. A kept entry for the item, made for the current state hash.
+2. The render target cache's current render pass and framebuffer are the entry's, and it has
+   nothing pending (no ownership transfer or resolve since): a render target epoch, bumped by
+   anything in the render target cache that changes EDRAM ownership or bindings.
+3. Step 6's texture and sampler checks.
+4. The vertex and index buffers are still trusted static ranges (registry generation).
+5. No memexport, occlusion query or predication in the draw.
+
+**Issuing it:** bind the kept pipeline if it differs, set the dynamic state that differs,
+upload float constants (step 7's runs; these change per draw) and reuse the kept system
+constants, bind descriptor sets, bind the kept index buffer, draw. Then mark the emulator's
+"current" caches the native draw changed (bound pipeline, descriptor sets, dynamic state,
+index buffer) as unknown, so the next emulated draw rebinds what it needs.
+
+**Fallback:** any failed check runs the normal `IssueDraw`, which also refreshes the entry.
+
+**Expected gain:** the per-draw cost of a known mesh draw going from about 3.3 µs to about
+1 µs (constant upload, binds, draw); with 900 to 1200 mesh draws in a heavy frame, 2 to 3 ms
+of the ~5.6 ms. On the phone, where the command thread takes 24 to 30 ms a heavy frame, the
+same fraction matters more.
+
+**Risks:**
+- Registers that churn without mattering lower the hit rate; measured first, before any draw
+  is skipped.
+- System constants that depend on more than registers (resolution scale, render target
+  layout): included in the entry's checks, or recomputed if found.
+- Hash collisions: 64-bit, and an optional debug mode that runs the normal path and compares
+  its result with the entry.
+
+### Steps
+
+1. **State hash and census.** Add the running register hash; log, per heavy frame, how many
+   known mesh draws find their entry with the same hash, and which registers changed when they
+   do not. Nothing is skipped yet. Decides whether A is worth building.
+2. **Skip pipeline, render target update and system constants** for draws that pass, with the
+   debug compare mode on during testing. A/B per step.
+3. **Skip primitive processing and vertex buffer checks**, then the remaining sections, until
+   a known mesh draw is constants + binds + draw.
+4. Only then, if the game thread sets the frame time, consider B.
