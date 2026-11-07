@@ -331,3 +331,19 @@ In-run A/B (`--perf_ab_cvar=native_draw_replay`, uncapped), heavy frames: 7.06 m
 6.34 ms on (-0.79 ± 0.15 ms); a second run -0.33 ± 0.26 ms (the machine was busy with
 another game); a third run with the machine idle: 6.12 ms off, 5.60 ms on (-0.47 ± 0.16 ms,
 about 164 -> 179 FPS of CPU work). Captures show the same image.
+
+## Step 7: constants (2026-11-06)
+
+The plan's step 2 ("constants from the engine") only saves CPU once draws skip the guest
+command stream: until then the game still writes every constant as register writes, which the
+command processor already takes in bulk (one byte-swapped copy per range, with dirty bits
+only for constants the current shaders use). What a draw still did per constant was the
+upload: a bit-scan loop copying 16 bytes per used constant.
+
+`gpu_constant_runs` (default on, hot reload) works out the contiguous runs of the current
+vertex and pixel constant maps once, when a map changes, and each draw copies its constants
+with one memcpy per run. The bytes uploaded are the same. In-run A/B, uncapped heavy frames:
+-0.27 ± 0.20 ms and -0.20 ± 0.33 ms: a small gain, not separable from noise in one run.
+
+Reading constants straight from the engine waits for step 4 (native draws), where it replaces
+the register writes altogether.
