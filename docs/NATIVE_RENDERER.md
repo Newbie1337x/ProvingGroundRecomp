@@ -485,3 +485,23 @@ and counts differences: on the skatepark route, about 700 checks per heavy frame
 pipeline and 0 viewport or system constant differences**. In-run A/B with the machine free:
 heavy frames 7.03 ms off, 6.78 ms on (-0.21 ± 0.11 ms); runs while another game was running
 were too noisy to read (±1.9 ms).
+
+## Materials: what porting shaders by hand would cover (2026-11-06)
+
+`--native_draw_census` now also ranks materials (vertex and pixel shader pairs) by draws. On
+the skatepark route (whole run, menus included; the machine was busy, so read the shares, not
+the times): 230 shader pairs. The two most drawn are tiny and not engine meshes (a 24-dword
+vertex shader with a 9-dword pixel shader, 16.7% of draws, and the same vertex shader with no
+pixel shader, 11.7%). Engine mesh materials are a long tail: the largest is 6% of draws, the
+next ones 1 to 2% each; the top 20 pairs cover 63% of draws.
+
+So porting shaders by hand, material by material, buys GPU time (simpler shaders than the
+translated microcode, which matters most on the phone) a percent or two of draws at a time.
+The CPU gain does not depend on porting: a native draw can use the shader the emulator already
+translated, and the fast path covers every known mesh at once (about 60% of draws). Plan:
+
+1. Finish the fast path (render target update, primitive processing, vertex buffer checks)
+   for all known meshes, with the emulator's translated shaders: the CPU gain.
+2. Port shaders by hand where the GPU time is: first find which pairs cost the most GPU time
+   (draw count × pixels × shader length), starting with the 6% mesh material and the two tiny
+   non-mesh pairs (find what draws them).
