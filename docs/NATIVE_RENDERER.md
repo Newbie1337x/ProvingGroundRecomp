@@ -505,3 +505,19 @@ translated, and the fast path covers every known mesh at once (about 60% of draw
 2. Port shaders by hand where the GPU time is: first find which pairs cost the most GPU time
    (draw count × pixels × shader length), starting with the 6% mesh material and the two tiny
    non-mesh pairs (find what draws them).
+
+## Step 10: render target update skipped when nothing changes (2026-11-06)
+
+`gpu_render_target_update_memo` (default on, hot reload; covers every draw, not only engine
+meshes). The render target cache's `Update` reads the render target, scissor, window offset,
+clip and stencil reference registers and the draw's depth control, color mask and discard
+state; for clipped, non-rectangle draws it reads nothing else. When those inputs equal the
+last update's, that update needed no EDRAM ownership transfers, and nothing else used the
+render target cache since (a resolve, the end or start of a submission, the frame generation
+depth sampling, clearing the cache), updating again would find the same render targets, make
+no transfers and keep the same render pass and framebuffer, so it is skipped.
+
+`--gpu_render_target_update_memo_verify` updates anyway and counts updates that changed
+something where the memo would have skipped: 0 on the route. About 200 of 540 updates a frame
+are skipped. In-run A/B, both while another game was running (heavy frames 10 to 12 ms):
+-1.85 ± 0.47 ms and -0.76 ± 0.25 ms; the gain on a free machine is likely smaller.
