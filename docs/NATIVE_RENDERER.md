@@ -685,3 +685,32 @@ washed out the image (bloom/lighting), so those clears are left to the draw.
 Result: the transfers into the shadow maps, the small pass and the main pass are gone; only the
 1-3 tile bloom transfers remain. In-run A/B (heavy frames, 30-frame halves): -0.24 +- 0.14 ms.
 Images match the step 1 captures.
+
+### Step 3: resolves as direct textures
+
+What resolves cost, measured on a heavy frame (3.1 ms GPU): about 37 color resolves, each
+followed by exactly one load of the same texture (the 1280x720 targets, the 320x180 and 80x45
+bloom/blur ping-pong at 08D68000/08D62000, the 32x32..1x1 luminance chain). Loads of those
+targets: 0.23 ms GPU; resolves (dump to the EDRAM buffer, copy to shared memory): 0.07 ms
+GPU, ~4 us CPU each. Skipping every color resolve (debug, wrong image) bounded the frame-work
+gain at -0.13 +- 0.25 ms on this machine at 1x: the win is GPU-side and grows with resolution.
+
+`gpu_resolve_direct_texture` (default on) does a resolve as one `vkCmdCopyImage` from the
+render target image straight into the texture's image when:
+
+- the source is one 1x k_8_8_8_8 render target owning every tile of the rectangle
+  (`RenderTargetCache::GetSoleOwnerRenderTarget`), with no clear in the resolve;
+- the destination is k_8_8_8_8 (no exponent bias, not an array slice, at 0,0) and a 2D tiled
+  8888 texture without mips was already loaded at that address with the same pitch and endian,
+  is current, and the resolve covers all of it.
+
+Nothing is written to shared memory and the texture is not invalidated, so no load follows.
+Red/blue swap in the resolve (most of the game's) is kept in the texture (`contents_rb_swapped`)
+and undone in its image views. Coherence: the ranges written only to images are tracked; a
+load from shared memory over one (a different texture over the same memory) puts that address
+back on the usual path for good, and a usual resolve over a range makes it current again. In
+the route only the 1x1 luminance target (07655000) and 0727D000 fall back.
+
+Result: loads of resolved targets 36.7 -> 4-6 per heavy frame (0.23 -> 0.01-0.03 ms GPU), resolve
+CPU ~4 -> ~2 us each. In-run A/B on a loaded machine: -0.40 +- 0.68 ms. Images unchanged
+(colors checked, so the swap is right).
