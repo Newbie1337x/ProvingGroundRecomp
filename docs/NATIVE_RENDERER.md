@@ -714,3 +714,29 @@ the route only the 1x1 luminance target (07655000) and 0727D000 fall back.
 Result: loads of resolved targets 36.7 -> 4-6 per heavy frame (0.23 -> 0.01-0.03 ms GPU), resolve
 CPU ~4 -> ~2 us each. In-run A/B on a loaded machine: -0.40 +- 0.68 ms. Images unchanged
 (colors checked, so the swap is right).
+
+### Step 4: shadow maps and the main pass on native images
+
+With host render targets the main pass, the shadow maps and the post-processing chain already
+draw into their own Vulkan images; what tied them to the emulated EDRAM was clears (step 2)
+and resolves, which went render target -> EDRAM buffer -> shared memory -> texture load. After
+steps 1-3 the color side is native; this step does the same for depth:
+
+- The two shadow maps (float24 depth, host D32_SFLOAT_S8_UINT, 1024x1024 at 06E18000 and
+  512x512 at 05630000) are resolved by the game every frame and sampled as k_24_8_FLOAT
+  (host R32_SFLOAT). `gpu_resolve_direct_texture` now copies their depth aspect into the
+  texture through a scratch buffer (`vkCmdCopyImageToBuffer` + `vkCmdCopyBufferToImage`;
+  depth -> color image copies are not allowed directly). GetResolveInfo reports a depth
+  resolve's destination as the depth's texture format, so that is what is matched.
+- Host depth is float32, the guest value float24: the texture now has the host value (what
+  the depth test used), not the float24 rounding of it. Shadows checked: no acne, same edges.
+
+Engine-level hooks for clears and resolves turned out unnecessary: recognizing them in the
+command processor (Direct3D's clear rectangle, RB_COPY_CONTROL) gives the same native
+operations without touching guest code, and keeps the emulated path for anything unusual.
+
+Result: in-run A/B of gpu_resolve_direct_texture with color and depth: -0.83 +- 0.25 ms per
+heavy frame. What is left of the EDRAM emulation in the route: ~10 small transfers
+(~0.12 ms GPU, the shadow map's first draw over the main pass's EDRAM and the luminance
+chain), the 1x1 and 0727D000 resolves (fall back, read through another texture), and the
+emulated path for anything the checks above reject.
