@@ -248,6 +248,9 @@ void OnSwapForTrace() {
       Record(k_##name, uint32_t(ctx.lr));                                          \
       SampleArgs(k_##name, ctx, base);                                             \
     }                                                                              \
+    if constexpr (k_##name == k_sub_82578638) {                                    \
+      pg::native::BeforeDrawIndexedVertices(ctx, base);                            \
+    }                                                                              \
     __imp__##name(ctx, base);                                                       \
   }
 #include "d3d_entry_points.inc"

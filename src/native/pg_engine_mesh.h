@@ -37,6 +37,12 @@ struct EngineMesh {
   uint8_t flat_alpha;
 };
 
+// Engine bypass marker (phase 1): a type-3 NOP packet with 3 payload dwords (magic, mesh
+// record address, pass) written before each draw of Engine_DrawMesh. The SDK command
+// processor recognizes it by the magic (CommandProcessor::kNativeDrawMarkerMagic).
+constexpr uint32_t kDrawMarkerHeader = (3u << 30) | (2u << 16) | (0x10u << 8);
+constexpr uint32_t kDrawMarkerMagic = 0x4E415456;  // "NATV"
+
 inline uint32_t LoadBigU32(const uint8_t* base, uint32_t address) {
   uint32_t value;
   std::memcpy(&value, base + address, sizeof(value));

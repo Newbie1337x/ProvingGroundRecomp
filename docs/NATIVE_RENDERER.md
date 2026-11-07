@@ -521,3 +521,31 @@ no transfers and keep the same render pass and framebuffer, so it is skipped.
 something where the memo would have skipped: 0 on the route. About 200 of 540 updates a frame
 are skipped. In-run A/B, both while another game was running (heavy frames 10 to 12 ms):
 -1.85 ± 0.47 ms and -0.76 ± 0.25 ms; the gain on a free machine is likely smaller.
+
+## Engine bypass, phase 1: marker packets (2026-11-06)
+
+The emulated command processor only sees Xbox 360 GPU packets, so it cannot tell which engine
+mesh a draw belongs to. Phase 1 of the engine bypass gives it that: with
+`--native_draw_markers`, every D3DDevice_DrawIndexedVertices (sub_82578638) made from inside
+Engine_DrawMesh is preceded by a type-3 NOP packet with three payload dwords: the magic
+`NATV`, the mesh record address and the pass (the draw's index within that Engine_DrawMesh
+call). The game writes it into the device's command buffer the way the draw writes its own
+packets (dev+48 last written dword, dev+56 limit, sub_8257B2D8 makes room). The SDK command
+processor reads it in its NOP handler and the next draw packet consumes it.
+
+How the draw is found, from the recompiled DrawIndexedVertices: the setters only update the
+device's shadow and dirty masks (dev+0..+40); the draw flushes the dirty ALU constants
+(sub_8258BD98, vertex from dev+1920 at register 0x4000, pixel from dev+6016 at 0x4400) and
+register blocks (sub_8258B9F8, shadow blocks at dev+10112..+10832), then writes the draw
+packets. State left dirty by a skipped draw is flushed by the next one, which is what phase 2
+relies on.
+
+Result on the route: every marker is consumed by a draw, none replaced before a draw; ~410 of
+~475 known mesh draws per heavy frame carry one (the rest come from other engine paths into the
+same buffers), ~1 marked draw per frame is not a known mesh draw yet. No visual change. An
+in-run A/B of the markers alone gave +0.87 ± 0.45 ms on a busy machine, within noise of the
+4 stores and one NOP per draw they cost; they are off by default until phase 2 uses them.
+
+Next, phase 2: for a marked draw of a learned (record, pass), the command processor draws from
+what it kept (pipeline, descriptor sets, host index buffer) instead of running the whole
+emulated draw, and the engine side stops producing the Direct3D work it no longer needs.

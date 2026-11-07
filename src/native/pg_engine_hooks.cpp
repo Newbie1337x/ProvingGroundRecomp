@@ -12,11 +12,16 @@
 //   --native_vb_check         logs whether the meshes' vertex data changes between frames
 //   --native_static_buffers   (on) registers the meshes' vertex data as static, so the GPU
 //                             emulation requests it once (gpu_trust_native_ranges)
+//   --native_draw_markers     writes a marker packet before each of the meshes' draws, so the
+//                             GPU emulation knows which mesh record and pass a draw belongs
+//                             to (engine bypass, phase 1)
 #include "pg_engine_mesh.h"
+#include "pg_d3d_trace.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <chrono>
 #include <map>
 #include <mutex>
@@ -54,7 +59,23 @@ REXCVAR_DEFINE_BOOL(native_static_buffers, true, "Perf",
                     "Tell the GPU emulation that the vertex data of the engine's meshes is "
                     "static (see rex/graphics/native_ranges.h)");
 
+REXCVAR_DEFINE_BOOL(native_draw_markers, false, "Perf",
+                    "Write a marker packet (type-3 NOP: magic, mesh record, pass) into the "
+                    "Direct3D command buffer before each draw of Engine_DrawMesh")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+extern "C" void sub_8257B2D8(PPCContext& __restrict ctx, uint8_t* base);
+
 namespace {
+
+// The Engine_DrawMesh call this thread is in (0 outside), and its draws so far.
+thread_local uint32_t t_mesh_record = 0;
+thread_local uint32_t t_mesh_pass = 0;
+
+inline void StoreBigU32(uint8_t* base, uint32_t address, uint32_t value) {
+  value = __builtin_bswap32(value);
+  std::memcpy(base + address, &value, sizeof(value));
+}
 
 struct MeshStats {
   uint64_t frames = 0;
@@ -324,6 +345,30 @@ void RegisterStaticBuffers(const uint8_t* base, const pg::native::EngineMesh& me
 
 namespace pg::native {
 
+// D3DDevice_DrawIndexedVertices (sub_82578638) is about to run, ctx.r3 = the device. Inside
+// Engine_DrawMesh, write the marker into the device's command buffer the way the draw writes
+// its own packets: dev+48 is the last written dword (stores are pre-increment), dev+56 the
+// limit past which sub_8257B2D8(dev) makes room and returns the new last written dword.
+void BeforeDrawIndexedVertices(PPCContext& ctx, uint8_t* base) {
+  const uint32_t record = t_mesh_record;
+  if (!record) return;
+  const uint32_t pass = t_mesh_pass++;
+  if (!REXCVAR_GET(native_draw_markers)) return;
+  const uint32_t device = ctx.r3.u32;
+  uint32_t ptr = LoadBigU32(base, device + 48);
+  if (ptr > LoadBigU32(base, device + 56)) {
+    PPCContext call = ctx;
+    call.r3.u64 = device;
+    sub_8257B2D8(call, base);
+    ptr = call.r3.u32;
+  }
+  StoreBigU32(base, ptr += 4, kDrawMarkerHeader);
+  StoreBigU32(base, ptr += 4, kDrawMarkerMagic);
+  StoreBigU32(base, ptr += 4, record);
+  StoreBigU32(base, ptr += 4, pass);
+  StoreBigU32(base, device + 48, ptr);
+}
+
 void OnSwapForEngineHooks() {
   {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -373,7 +418,12 @@ extern "C" void sub_824C4128(PPCContext& __restrict ctx, uint8_t* base) {
   }
   const uint32_t record = ctx.r3.u32;
   const uint32_t override_effect = ctx.r4.u32;
+  const uint32_t outer_record = t_mesh_record, outer_pass = t_mesh_pass;
+  t_mesh_record = record;
+  t_mesh_pass = 0;
   __imp__sub_824C4128(ctx, base);
+  t_mesh_record = outer_record;
+  t_mesh_pass = outer_pass;
   if (g_dumping.load(std::memory_order_relaxed)) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_dumping) DumpMesh(base, record, override_effect);
