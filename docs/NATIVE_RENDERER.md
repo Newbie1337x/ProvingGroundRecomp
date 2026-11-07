@@ -329,4 +329,5 @@ come from the entry. Any failed check drops the entry and the draw takes the nor
 Skatepark route: about 470 mesh draws replayed per heavy frame, about 5 failed checks.
 In-run A/B (`--perf_ab_cvar=native_draw_replay`, uncapped), heavy frames: 7.06 ms off,
 6.34 ms on (-0.79 ± 0.15 ms); a second run -0.33 ± 0.26 ms (the machine was busy with
-another game). Captures show the same image.
+another game); a third run with the machine idle: 6.12 ms off, 5.60 ms on (-0.47 ± 0.16 ms,
+about 164 -> 179 FPS of CPU work). Captures show the same image.
