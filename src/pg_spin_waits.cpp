@@ -23,6 +23,11 @@
 #include <rex/logging.h>
 #include <rex/ppc.h>
 
+#if REX_PLATFORM_ANDROID
+#include <dlfcn.h>
+#include <unistd.h>
+#endif
+
 REXCVAR_DEFINE_BOOL(sleep_in_spin_waits,
 #if REX_PLATFORM_ANDROID
                     true,
@@ -44,6 +49,11 @@ REXCVAR_DEFINE_BOOL(swap_waits_for_new_frame,
                     "instead of drawing the last one again (when the main loop is slower than "
                     "the render thread, the repeated frames took CPU and GPU time from it)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(android_performance_hints, true, "Perf",
+                    "On Android, report the game logic's frame work to the system (ADPF "
+                    "performance hint session for the main loop and render threads) so it "
+                    "raises the CPU clocks for them")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(log_frame_stats, false, "Perf",
                     "Log the frame time distribution and the frame threads' waits every 5 "
                     "seconds")
@@ -114,6 +124,57 @@ float LoadGuestFloat(const uint8_t* base, uint32_t address) {
   return value;
 }
 
+#if REX_PLATFORM_ANDROID
+// Android performance hints (ADPF, API 33; looked up at run time since the app supports API 29).
+// The frame threads wait for each other with short sleeps, so no thread looks busy and the CPU
+// governor kept the big cores at 0.8-2.0 GHz of 3.0 while the game logic took ~28 ms a frame.
+// A hint session tells the system the frame budget and the work actually done, and it raises the
+// clocks of the session's threads to meet it.
+class PerformanceHints {
+ public:
+  void SetMainThread() { main_tid_.store(gettid(), std::memory_order_relaxed); }
+  void SetRenderThread() { render_tid_.store(gettid(), std::memory_order_relaxed); }
+  // From the main loop thread, once per frame: the time it worked, without its waits.
+  void ReportMainLoopWork(int64_t work_ns) {
+    if (!REXCVAR_GET(android_performance_hints)) return;
+    if (!session_ && !failed_) Create();
+    if (session_) report_(session_, std::max<int64_t>(work_ns, 1));
+  }
+
+ private:
+  using GetManager = void* (*)();
+  using CreateSession = void* (*)(void*, const int32_t*, size_t, int64_t);
+  using Report = int (*)(void*, int64_t);
+  void Create() {
+    const int32_t tids[2] = {main_tid_.load(std::memory_order_relaxed),
+                             render_tid_.load(std::memory_order_relaxed)};
+    if (!tids[0] || !tids[1]) return;  // Both threads seen first.
+    failed_ = true;
+    void* android = dlopen("libandroid.so", RTLD_NOW);
+    if (!android) return;
+    auto get_manager = reinterpret_cast<GetManager>(dlsym(android, "APerformanceHint_getManager"));
+    auto create = reinterpret_cast<CreateSession>(dlsym(android, "APerformanceHint_createSession"));
+    report_ = reinterpret_cast<Report>(dlsym(android, "APerformanceHint_reportActualWorkDuration"));
+    if (!get_manager || !create || !report_) {
+      REXLOG_INFO("Performance hints: not available on this Android version");
+      return;
+    }
+    void* manager = get_manager();
+    // The budget of a 60 FPS frame.
+    session_ = manager ? create(manager, tids, 2, 16666667) : nullptr;
+    REXLOG_INFO("Performance hints: session for main loop thread {} and render thread {}: {}",
+                tids[0], tids[1], session_ ? "created" : "refused");
+    failed_ = !session_;
+  }
+  std::atomic<int32_t> main_tid_{0};
+  std::atomic<int32_t> render_tid_{0};
+  void* session_ = nullptr;
+  Report report_ = nullptr;
+  bool failed_ = false;
+};
+PerformanceHints performance_hints;
+#endif
+
 }  // namespace
 
 namespace pg {
@@ -129,6 +190,10 @@ void WaitForNewMainLoopFrame() {
   static uint64_t last_count = 0;
   static Clock::time_point last_new_frame = Clock::now();
   static double frame_interval_s = 1.0 / 30.0;
+#if REX_PLATFORM_ANDROID
+  static const bool render_thread_set = (performance_hints.SetRenderThread(), true);
+  (void)render_thread_set;
+#endif
   uint64_t count = main_loop_frame_count.load(std::memory_order_acquire);
   if (count == last_count && REXCVAR_GET(swap_waits_for_new_frame) &&
       Clock::now() - last_new_frame < std::chrono::milliseconds(250)) {
@@ -196,9 +261,21 @@ extern "C" void __imp__sub_824852F8(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_824852F8(PPCContext& __restrict ctx, uint8_t* base) {
   const bool from_main_loop = uint32_t(ctx.lr) == kMainLoopHandOverCall;
   __imp__sub_824852F8(ctx, base);
+  // End of the main loop's last wait for the render thread: its work since then is this frame's.
+  static thread_local Clock::time_point work_start{};
   if (from_main_loop) {
     main_loop_frames.fetch_add(1, std::memory_order_relaxed);
     main_loop_frame_count.fetch_add(1, std::memory_order_release);
+#if REX_PLATFORM_ANDROID
+    const auto now = Clock::now();
+    if (work_start == Clock::time_point{}) {
+      performance_hints.SetMainThread();
+    } else {
+      performance_hints.ReportMainLoopWork(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(now - work_start).count());
+    }
+    work_start = now;
+#endif
   }
   if (!from_main_loop || !REXCVAR_GET(sleep_in_spin_waits) ||
       LoadU32(base, kMainLoopIntervalAddress) != 0) {
@@ -208,6 +285,7 @@ extern "C" void sub_824852F8(PPCContext& __restrict ctx, uint8_t* base) {
   const uint32_t hand_over = ctx.r28.u32;
   WaitFor([&] { return LoadU32(base, hand_over + 24) != LoadU32(base, hand_over + 20); },
           hand_over_wait_ns);
+  work_start = Clock::now();
 }
 
 extern "C" void __imp__sub_8234BE18(PPCContext& __restrict ctx, uint8_t* base);
