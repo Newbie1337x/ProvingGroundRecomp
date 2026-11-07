@@ -998,4 +998,67 @@ Steps, each testable on PC (route + screenshots) before the next:
    next render pass where possible (the loads of a submission's first draws are already known
    when it begins), and shared memory uploads of a frame are batched.
 
-Not started yet; step 1 is the next change.
+Step 1 is done (below); step 2's blits are partly in it already, as the simple path.
+
+### Native EDRAM step 1: per-render-target scale (2026-11-07)
+
+`--native_main_pass_scale_sixteenths=N` (hot-reloadable, GPU/Native, default 16 = off; 0 is
+off too): the main scene's render targets are host images at N/16 of a guest pixel, 12 = 0.75
+(960x540), 24 = 1.5 (1920x1080). Vulkan, host render targets path only; the rest of the
+renderer keeps the global integer `draw_resolution_scale_x/y`.
+
+How it works (SDK, `patches/rexglue-sdk.patch`):
+
+- `RenderTargetKey` has a 6-bit `own_scale_sixteenths` (0 = global scale). A render target with
+  its own scale is a different render target from the one with the same EDRAM layout at the
+  global scale (its "unscaled twin"), so ownership, transfers and the update memo work as
+  before; changing the cvar makes new keys (the command processor drops the update memo and the
+  native replay entries when it changes).
+- Which keys: `RenderTargetCache::IsMainPassKey`, color at EDRAM base 0 and depth at 720, pitch
+  16 tiles (1280), 1x, 32bpp, measured on the skatepark route. A draw gets the scale only if all
+  its bound render targets can have it (one framebuffer size); a resolve clear decides per key.
+  `IsOwnScaleSupported` (Vulkan only, the D3D12 backend never scales) checks the size limits
+  and that the format can be copied between scales.
+- Draws into it: image and framebuffer sizes use the key's scale; the viewport is computed in
+  guest pixels (`GetHostViewportInfo` with scale 1) and multiplied by N/16 in
+  `UpdateDynamicState`, the scissor is rounded to host pixels, depth bias slope uses N/16, the
+  point size system constant uses the guest-pixel viewport, and `ps_param_gen` (pixel position)
+  gets a pixel shader modification `pixel_position_scale_sixteenths` (multiplied by 16/N; the
+  scale is predicted from the registers before the update, `PredictDrawOwnScaleSixteenths`).
+- Everything that reads or copies a render target with its own scale goes through its unscaled
+  twin: resolves (direct-to-texture and through the EDRAM buffer dumps) first copy the source
+  rectangle into the twin and read the twin; transfers from it read the twin; transfers into it
+  are made into the twin (the usual EDRAM transfer shaders) and then copied into it; resolve
+  clears clear the scaled rectangle. Color is copied with `vkCmdBlitImage` (linear). Depth /
+  stencil by a small draw (fetch depth and stencil, write `FragDepth` and `FragStencilRefEXT`),
+  because this AMD driver has no blit for D32_SFLOAT_S8_UINT; without
+  VK_EXT_shader_stencil_export, depth is not scaled and so draws with depth stay at the global
+  scale.
+
+Route results (PC, 720p internal, 1080p window; screenshots at 30/38/46 s compared with a run
+with the cvar off): at 12 and 24 the image is complete, no missing geometry, character outline
+and post effects aligned. At 0.75 it is softer as expected; at 1.5 it is no sharper than 1x (a bit
+softer, from the linear 1.5 -> 1 copy), because the post chain still gets the scene resolved to
+1x (step 3). About 10 copies a heavy
+frame between the scaled targets and their twins (color resolves, one depth copy, one copy
+into the scaled color after a transfer).
+
+GPU timing (`--vulkan_gpu_timing=true`, the two gameplay windows of the route, ms):
+
+| N | main scene (D0 720 + C0 0) | full-screen C0 0 | resolves | all frames | 1500+ draw frames (GPU busy) |
+|---|---|---|---|---|---|
+| 16 (off) | 0.58 / 0.64 | 0.08 / 0.10 | 0.28 / 0.28 | 2.53 / 2.89 | 2.95 / 2.76 |
+| 12 (0.75) | 0.49 / 0.54 | 0.06 / 0.07 | 0.31 / 0.32 | 2.55 / 2.85 | 2.90 / 2.72 |
+| 24 (1.5) | 0.90 / 0.89 | 0.15 / 0.17 | 0.35 / 0.35 | 2.88 / 3.05 | 3.78 / 3.54 |
+
+On this desktop GPU the main scene is ~0.6 ms of ~2.8 ms and not mostly fill-bound (0.56x the
+pixels cost 0.84x the time), so 0.75 saves ~0.1 ms and the copies to the twins eat part of it
+(resolves +0.03-0.04 ms). The phone, where the main scene is ~10.9 ms of 27-36 ms at 720p, is
+where it should pay; not measured there yet (PC only for this step).
+
+Limits and open points: memexport from pixel shaders into a scaled target is not handled (once
+per guest pixel only holds at integer scales); the cvar was tested from the command line, not
+changed during a run; the first route run of the session ended at 19 s with an access violation
+inside ProvingGround.exe at startup (the unreproduced startup AV seen before, cvar off), every
+later run was complete. Next: step 2/3, resolves straight from the scaled target into textures
+at its scale, so 1.5 shows its detail and the twin copies go away.
