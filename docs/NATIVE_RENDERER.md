@@ -899,3 +899,28 @@ previous draw's, so the reuse of the last set rarely applied).
 What is left per native draw (heavy frames): the replay checks ~0.3 ms (lookup, fetch constant
 compare, textures, samplers), uploading constants ~0.2-0.35 ms (all draws), the checks before
 the draw ~0.2 ms (including draws that then fall back), pipeline and dynamic state ~0.13 ms.
+
+### Static ranges after the CPU writes them (2026-11-07)
+
+Bug found by the user in play (night parking lot, after the skatepark): a head, the sky and the
+upper half of buildings missing, "a vertex explosion". With `--gpu_trust_native_ranges=false`
+it was gone: static ranges (step 3) were trusted forever once requested, and nothing ever
+unregistered them, so when the game put other data where a registered mesh had been, the
+emulator kept drawing the old data.
+
+- `native_ranges::InvalidateWritten`, called from the shared memory's invalidation callback
+  (a watched page faulted, or a file was read into memory): vertex ranges in the written pages
+  are marked dirty (the command processor requests them again, clearing the mark, before
+  trusting them; a native mesh draw over a dirty range falls back), index ranges are forgotten
+  (their conversions are kept by generation; the hook registers them again when the mesh is
+  drawn, also when the registry no longer has a range it registered).
+  `native_ranges_invalidate_on_write` (default on) turns it off.
+- First version forgot every written range: ~2-3 per frame on the route (pages shared between
+  a mesh and data the CPU writes every frame, e.g. 14EC9000 with a range at 14EC9480), and every
+  removal invalidated all native mesh entries, the found-range cache and with it every replay
+  key: 4.2 -> 6.2 ms. Fixed by (1) native mesh entries keeping the generations of their own
+  ranges and staying valid when only other ranges were removed, (2) the replay key looking up
+  its vertex buffer itself, (3) vertex ranges marked dirty instead of removed.
+- Cost of being right, A/B in one build: GPU command thread work in 1500+ draw frames
+  4.80 / 4.67 ms on vs 4.26 / 4.27 ms off; the few ranges written every frame are requested
+  (and their pages uploaded) each frame, ~8 draws fall back, and their pages fault again.

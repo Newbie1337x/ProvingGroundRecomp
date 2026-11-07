@@ -321,17 +321,21 @@ std::unordered_map<uint32_t, Registered> g_registered;  // by physical address
 uint64_t g_registrations = 0;
 
 // Registers one buffer's data (physical address and size) as static.
-void RegisterStaticRange(uint32_t data, uint32_t size, uint32_t buffer_object) {
+void RegisterStaticRange(uint32_t data, uint32_t size, uint32_t buffer_object, bool is_index) {
   // Buffers live in the 0xA0000000 view of physical memory.
   if (data < 0xA0000000u || data >= 0xE0000000u || !size) return;
   const uint32_t physical = data & 0x1FFFFFFFu;
   auto [it, inserted] = g_registered.try_emplace(physical, Registered{size, buffer_object});
   if (!inserted) {
-    if (it->second.size == size && it->second.vertex_buffer == buffer_object) return;
+    // Still registered (the GPU emulation forgets a range when the CPU writes into it).
+    if (it->second.size == size && it->second.vertex_buffer == buffer_object &&
+        rex::graphics::native_ranges::Lookup(physical, size)) {
+      return;
+    }
     it->second = {size, buffer_object};
   }
   ++g_registrations;
-  rex::graphics::native_ranges::Register(physical, size);
+  rex::graphics::native_ranges::Register(physical, size, is_index);
 }
 
 // What the last registration of a mesh record's buffers saw, so a record drawn again with the
@@ -341,6 +345,8 @@ struct SeenBuffers {
   uint32_t record = 0;
   uint32_t vertex_buffer = 0, vertex_words[2] = {};
   uint32_t index_buffer = 0, index_words[2] = {};
+  // native_ranges::RemovalVersion when seen: a range forgotten since is registered again.
+  uint32_t removal_version = 0;
 };
 SeenBuffers g_seen_buffers[4096];
 
@@ -349,6 +355,7 @@ void RegisterStaticBuffers(const uint8_t* base, const pg::native::EngineMesh& me
   current.record = mesh.address;
   current.vertex_buffer = mesh.vertex_buffer;
   current.index_buffer = mesh.index_buffer;
+  current.removal_version = rex::graphics::native_ranges::RemovalVersion();
   if (mesh.vertex_buffer) {
     current.vertex_words[0] = pg::native::LoadBigU32(base, mesh.vertex_buffer + 24);
     current.vertex_words[1] = pg::native::LoadBigU32(base, mesh.vertex_buffer + 28);
@@ -366,12 +373,13 @@ void RegisterStaticBuffers(const uint8_t* base, const pg::native::EngineMesh& me
     RegisterStaticRange(
         pg::native::LoadBigU32(base, mesh.vertex_buffer + 24) & ~3u,
         ((pg::native::LoadBigU32(base, mesh.vertex_buffer + 28) >> 2) & 0xFFFFFFu) * 4,
-        mesh.vertex_buffer);
+        mesh.vertex_buffer, false);
   }
   if (mesh.index_buffer) {
     // Words 24/28: data address and size in bytes.
     RegisterStaticRange(pg::native::LoadBigU32(base, mesh.index_buffer + 24),
-                        pg::native::LoadBigU32(base, mesh.index_buffer + 28), mesh.index_buffer);
+                        pg::native::LoadBigU32(base, mesh.index_buffer + 28), mesh.index_buffer,
+                        true);
   }
 }
 
@@ -447,6 +455,17 @@ void OnSwapForEngineHooks() {
       g_stats.index_buffers.size(), g_stats.effects.size(), g_stats.declarations.size());
   REXLOG_INFO("Engine mesh static range registrations: {} so far, {} buffers",
               g_registrations, g_registered.size());
+  {
+    uint64_t counts[2];
+    uint32_t samples[16][2];
+    rex::graphics::native_ranges::GetInvalidationStats(counts, samples);
+    std::string list;
+    for (const auto& sample : samples) {
+      if (sample[1]) list += fmt::format(" {:08X}>{:08X}", sample[0], sample[1]);
+    }
+    REXLOG_INFO("Static ranges forgotten after CPU writes: {} by page faults, {} exact; recent{}",
+                counts[0], counts[1], list);
+  }
   REXLOG_INFO("Engine meshes per frame by primitive{}; by blend mode{}; by stride{}",
               Histogram(g_stats.primitives, g_stats.frames),
               Histogram(g_stats.blend_modes, g_stats.frames),
