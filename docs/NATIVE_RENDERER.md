@@ -643,3 +643,23 @@ gone from the frame (~2.5 clears per frame); in-run A/B -0.28 ± 0.19 ms on heav
 are CPU bound (the GPU saving is larger than what shows in frame time); shadows and lighting
 unchanged in the captures. A guest access violation at startup was seen once in six runs with
 it on and not reproduced since.
+
+### Step 2 findings: the remaining transfers
+
+The frame sequence log now also names the draw behind each transfer and, for Direct3D's
+clears, their rectangle (from the clear's vertex buffer, fetch constant 95, 8-in-32 endian,
+7 dwords per vertex: x y z then the color). Of the five transfers left after step 1:
+
+- Into the two shadow maps (pitch 13 and 7 tiles) and the small pass (pitch 4): the draw is
+  Direct3D's clear, the first draw on a target whose EDRAM held the previous pass. The copied
+  contents are overwritten right away, but Direct3D splits a clear into chunks (the 1024x1024
+  shadow map is cleared as x 0-960 and 960-1024 in 1x pixels; the main pass as 1280x720 in
+  one), so the chunk that causes the transfer never covers the whole target.
+- C0 at tile 0 from D0: a full-screen post-processing draw (vs ...0C0DE1F84) over EDRAM that
+  held depth; possibly needed, not touched.
+- Two 1-3 tile transfers in the bloom chain.
+
+Plan: make Direct3D's clears render target cache clears (the cache already leaves a resolve
+clear's rectangle out of its transfers): rectangle from the vertices, color from the vertices,
+depth from z, stencil from RB_STENCILREFMASK, then no transfer for the cleared area and no
+clear draw. Then step 3 (resolves as direct textures).
