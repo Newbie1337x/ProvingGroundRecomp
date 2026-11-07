@@ -30,11 +30,20 @@ REXCVAR_DEFINE_STRING(d3d_trace, "", "Perf",
                       "Count the game's Direct3D calls per frame, by caller and thread, and "
                       "write the report to this file every 10 seconds");
 
+// Every entry point only for tracing (PG_D3D_TRACE_ALL): wrapping all of them broke the
+// storage device check on Android (the guest loops on a read fault at "checking storage
+// device"); without it only the draw is wrapped and --d3d_trace counts only the draw.
+#if PG_D3D_TRACE_ALL
+#define PG_D3D_ENTRIES "d3d_entry_points.inc"
+#else
+#define PG_D3D_ENTRIES "d3d_entry_points_draw.inc"
+#endif
+
 namespace {
 
 enum EntryIndex : uint32_t {
 #define PG_D3D_ENTRY(name, game_callers, lines) k_##name,
-#include "d3d_entry_points.inc"
+#include PG_D3D_ENTRIES
 #undef PG_D3D_ENTRY
   kEntryCount
 };
@@ -46,7 +55,7 @@ struct EntryInfo {
 };
 constexpr EntryInfo kEntries[] = {
 #define PG_D3D_ENTRY(name, game_callers, lines) {#name, game_callers, lines},
-#include "d3d_entry_points.inc"
+#include PG_D3D_ENTRIES
 #undef PG_D3D_ENTRY
 };
 
@@ -253,5 +262,5 @@ void OnSwapForTrace() {
     }                                                                              \
     __imp__##name(ctx, base);                                                       \
   }
-#include "d3d_entry_points.inc"
+#include PG_D3D_ENTRIES
 #undef PG_D3D_ENTRY
