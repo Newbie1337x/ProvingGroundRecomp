@@ -10,6 +10,8 @@ param(
     [switch]$Sample,
     # Also write timeline.csv: game-thread and GPU-thread wait events in the window.
     [switch]$Timeline,
+    # Also write pacing.csv: each swap of the render thread against the main loop's frames.
+    [switch]$Pacing,
     # Appended to the output directory name, e.g. "base" or "change1".
     [string]$Label = '',
     # By default the game runs muted, in a small window on -Monitor, without taking
@@ -59,6 +61,7 @@ if ($NoVsync) { $gameArgs += '--frame_rate_limit=0' }
 if (-not $NoTracy) { $gameArgs += '--tracy' }
 if ($Sample) { $gameArgs += "--sample_profile=$out\samples.txt" }
 if ($Timeline) { $gameArgs += "--timeline_trace=$out\timeline.csv" }
+if ($Pacing) { $gameArgs += "--pacing_trace_csv=$out\pacing.csv" }
 if (-not $Visible) {
     $gameArgs += @('--audio_mute', '--fullscreen=false', "--window_width=$WindowWidth",
         "--window_height=$WindowHeight", "--monitor=$Monitor")

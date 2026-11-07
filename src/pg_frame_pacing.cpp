@@ -14,7 +14,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <string>
 #include <thread>
 
 #include <rex/cvar.h>
@@ -32,6 +35,14 @@ REXCVAR_DEFINE_BOOL(uncapped_real_time, true, "GPU",
 REXCVAR_DEFINE_INT32(frame_rate_limit, 60, "Video",
                      "Frame rate limit: 30 is the original vsync pacing, 0 is unlimited")
     .allowed({"0", "30", "60", "120", "144", "165", "240"});
+REXCVAR_DEFINE_BOOL(swap_waits_for_new_frame, true, "Video",
+                    "After a swap, the render thread waits for the game's next frame instead of "
+                    "presenting the last one again")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_STRING(pacing_trace_csv, "", "Perf",
+                      "Write one line per swap (host time, main loop frames, engine time) to "
+                      "this CSV, inside the measurement window of an input replay")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace {
 
@@ -111,17 +122,105 @@ void LimitFrameRate() {
   }
   const auto period = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / limit));
   const auto now = Clock::now();
-  // Restart the schedule after a stall (loading) instead of rushing to catch up.
-  if (next == Clock::time_point{} || now - next > period * 2) {
+  // A frame that took longer than the period ends at once, and the schedule restarts from it:
+  // neither waiting a whole period after it (above 60 FPS a 20 ms frame was followed by a 7 ms
+  // sleep) nor rushing the next frames to catch up, which made uneven intervals.
+  if (next == Clock::time_point{} || now >= next + period) {
     next = now;
+    return;
   }
   next += period;
   WaitUntil(next);
 }
 
+// Sleeps for about the given time (a high-resolution timer on Windows, where a plain sleep can
+// take a millisecond or more).
+void SleepBriefly(std::chrono::microseconds duration) {
+#if REX_PLATFORM_WIN32
+  static thread_local HANDLE timer = CreateWaitableTimerExW(
+      nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+  LARGE_INTEGER due;
+  due.QuadPart = -std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count() / 100;
+  if (timer && SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) {
+    WaitForSingleObject(timer, INFINITE);
+    return;
+  }
+#endif
+  std::this_thread::sleep_for(duration);
+}
+
+// Pacing trace: the render thread's swaps against the main loop's frames, to tell repeated
+// or skipped game frames and the engine time each presented frame advanced.
+std::atomic<bool> trace_active{false};
+std::atomic<uint64_t> main_loop_frames{0};
+// Sum of the engine's frame time over the main loop's frames (seconds), written by the main loop.
+std::atomic<double> main_loop_engine_time{0.0};
+std::FILE* trace_file = nullptr;
+
+// Called after each swap. When the main loop is slower than the render thread, the render
+// thread drew the main loop's last frame again: uncapped, half the presented frames were
+// repeats (286 presented for 153 game frames per second), and at 30 FPS the swap's vblank wait
+// let it present some frames after one vblank and others after two, so the game's frames were
+// shown for 17 or 50 ms. Each repeat also took CPU and GPU time from the main loop. Waits until
+// the main loop hands over its next frame, for at most twice its recent frame time, and not at
+// all when it has handed over none for a while (loading screens, which the render thread
+// animates on its own).
+void WaitForNewMainLoopFrame() {
+  static uint64_t last_count = 0;
+  static Clock::time_point last_new_frame = Clock::now();
+  static double frame_interval_s = 1.0 / 30.0;
+  uint64_t count = main_loop_frames.load(std::memory_order_acquire);
+  if (count == last_count && REXCVAR_GET(swap_waits_for_new_frame) &&
+      Clock::now() - last_new_frame < std::chrono::milliseconds(250)) {
+    const auto deadline = last_new_frame + std::chrono::duration_cast<Clock::duration>(
+                                               std::chrono::duration<double>(2.0 * frame_interval_s));
+    while ((count = main_loop_frames.load(std::memory_order_acquire)) == last_count &&
+           Clock::now() < deadline) {
+      SleepBriefly(std::chrono::microseconds(100));
+    }
+  }
+  if (count != last_count) {
+    const auto now = Clock::now();
+    const double since = std::chrono::duration<double>(now - last_new_frame).count();
+    frame_interval_s =
+        std::clamp(0.8 * frame_interval_s + 0.2 * since / double(count - last_count), 0.002, 0.1);
+    last_count = count;
+    last_new_frame = now;
+  }
+}
+
+void TraceSwap(const uint8_t* base, Clock::time_point swap_start, Clock::time_point swap_end,
+               Clock::time_point limit_end) {
+  if (!trace_file || !trace_active.load(std::memory_order_relaxed)) return;
+  static const Clock::time_point origin = swap_start;
+  auto us = [](Clock::duration d) {
+    return (long long)std::chrono::duration_cast<std::chrono::microseconds>(d).count();
+  };
+  std::fprintf(trace_file, "%lld,%lld,%lld,%llu,%.6f,%.6f\n", us(swap_start - origin),
+               us(swap_end - origin), us(limit_end - origin),
+               (unsigned long long)main_loop_frames.load(std::memory_order_acquire),
+               main_loop_engine_time.load(std::memory_order_acquire),
+               LoadGuestFloat(base, kFrameDeltaAddress));
+}
+
 }  // namespace
 
 namespace pg {
+
+void SetPacingTraceActive(bool active) {
+  static std::once_flag open;
+  std::call_once(open, [] {
+    const std::string path = REXCVAR_GET(pacing_trace_csv);
+    if (path.empty()) return;
+    trace_file = std::fopen(path.c_str(), "w");
+    if (trace_file) {
+      std::fputs("swap_start_us,swap_end_us,limit_end_us,main_frames,engine_s,frame_delta_s\n",
+                 trace_file);
+    }
+  });
+  trace_active.store(active, std::memory_order_relaxed);
+  if (!active && trace_file) std::fflush(trace_file);
+}
 
 double PresentedFps() { return presented_fps.load(std::memory_order_relaxed); }
 
@@ -149,11 +248,16 @@ extern "C" void sub_824853A8(PPCContext& __restrict ctx, uint8_t* base) {
   static const uint32_t original_swap_interval = *swap_interval;
   *swap_interval = Uncapped() ? 0 : original_swap_interval;
   rex::perf::TimelineScope scope(rex::perf::TimelineEvent::kGuest1);
+  const auto swap_start = Clock::now();
   in_swap = true;
   __imp__sub_824853A8(ctx, base);
   in_swap = false;
+  const auto swap_end = Clock::now();
+  WaitForNewMainLoopFrame();
   LimitFrameRate();
-  CountFrame(Clock::now());
+  const auto limit_end = Clock::now();
+  TraceSwap(base, swap_start, swap_end, limit_end);
+  CountFrame(limit_end);
   pg::dev::OnSwap(base);
 }
 
@@ -213,5 +317,20 @@ extern "C" void sub_8234BD00(PPCContext& __restrict ctx, uint8_t* base) {
   }
   for (; counted <= real; ++counted) {
     __imp__sub_8234BD00(ctx, base);
+  }
+}
+
+// The main loop's hand-over of a frame to the render thread (sub_824852F8 called from
+// sub_8247E318): counts the main loop's frames for WaitForNewMainLoopFrame and the trace.
+extern "C" void __imp__sub_824852F8(PPCContext& __restrict ctx, uint8_t* base);
+extern "C" void sub_824852F8(PPCContext& __restrict ctx, uint8_t* base) {
+  constexpr uint32_t kMainLoopHandOverCall = 0x8247E368;
+  const bool from_main_loop = uint32_t(ctx.lr) == kMainLoopHandOverCall;
+  __imp__sub_824852F8(ctx, base);
+  if (from_main_loop) {
+    main_loop_engine_time.store(main_loop_engine_time.load(std::memory_order_relaxed) +
+                                    LoadGuestFloat(base, kFrameDeltaAddress),
+                                std::memory_order_relaxed);
+    main_loop_frames.fetch_add(1, std::memory_order_release);
   }
 }
