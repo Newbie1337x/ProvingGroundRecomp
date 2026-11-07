@@ -868,3 +868,34 @@ So in a heavy frame the meshes cost ~1.4 ms in the command processor's (native) 
 GPU, ~0.55 ms in Direct3D's flush and the packets it makes (the most 3a can save, less the
 packet it writes instead), and ~0.3 ms (p99 ~1.2 ms) in the engine's own mesh code and setters
 (3b). The largest piece is the command processor's per-draw cost of native draws.
+
+### The native draw's own cost (2026-11-07)
+
+With the ceilings showing the command processor's native mesh draws as the largest piece, the
+draw section timing (`vulkan_gpu_timing`, `vulkan_gpu_timing_min_draws=1500`) now splits the
+native path (`native: ...` sections) and UpdateBindings (`bindings: ...`). Heavy frames, 720p:
+~1.78 ms in native mesh draws (~300 a frame, ~5.8 us each, more than an emulated draw's
+average), of which UpdateBindings 0.82 ms, and inside it writing descriptor sets 0.69 ms
+(every native draw wrote a new transient texture descriptor set: the textures differ from the
+previous draw's, so the reuse of the last set rarely applied).
+
+- `native_texture_sets` (default on, hot reload): a replayed draw keeps its vertex and pixel
+  texture descriptor sets in its replay entry, written once with the entry's image infos. They
+  stay valid while the entry does: the entry is dropped when the texture lookup generation
+  changes (a texture destroyed), the captured textures are outdated or the samplers are not the
+  same objects, and re-recording it clears the sets. They come from their own pool
+  (16384 sets); when it is full it is retired (reset once the frames using it are completed) and
+  an epoch counter makes every kept set be written again in a fresh pool. Route: 99.6% of
+  native texture bindings reuse a kept set; descriptor writes 0.69 -> 0.22 ms per heavy frame.
+- TryNativeReplay re-checked each entry's samplers once per submission with a hash lookup each
+  (`UseSampler`), more than half of its time: the entry now keeps handles to the texture
+  cache's sampler entries, valid while no sampler was destroyed (`sampler_generation`), and
+  marks them used directly. Its sampler part halved.
+- A/B in one build (separate runs, unloaded machine), `native_texture_sets` on/off: GPU command
+  thread work in 1500+ draw frames 4.24 / 4.13 ms vs 4.54 / 4.62 ms; frame time p95 4.53 / 4.41
+  vs 4.64 / 4.73 ms; mean 600 / 620 vs 580 / 571 fps. (At the start of the day: 5.44 ms work,
+  p95 5.0-5.2 ms.)
+
+What is left per native draw (heavy frames): the replay checks ~0.3 ms (lookup, fetch constant
+compare, textures, samplers), uploading constants ~0.2-0.35 ms (all draws), the checks before
+the draw ~0.2 ms (including draws that then fall back), pipeline and dynamic state ~0.13 ms.
