@@ -61,6 +61,30 @@ index af35fa8..f07bd48 100644
  
  # The upstream FidelityFX targets expose source-tree include paths in
  # INTERFACE_INCLUDE_DIRECTORIES, which breaks our install export checks.
+diff --git a/include/rex/audio/flags.h b/include/rex/audio/flags.h
+index c2f70ba..5c441f2 100644
+--- a/include/rex/audio/flags.h
++++ b/include/rex/audio/flags.h
+@@ -14,4 +14,5 @@
+ #include <rex/cvar.h>
+ 
+ REXCVAR_DECLARE(bool, audio_mute);
++REXCVAR_DECLARE(bool, audio_stats);
+ REXCVAR_DECLARE(bool, ffmpeg_verbose);
+diff --git a/include/rex/audio/sdl/sdl_audio_driver.h b/include/rex/audio/sdl/sdl_audio_driver.h
+index f8949ca..9068aec 100644
+--- a/include/rex/audio/sdl/sdl_audio_driver.h
++++ b/include/rex/audio/sdl/sdl_audio_driver.h
+@@ -49,6 +49,9 @@ class SDLAudioDriver : public AudioDriver {
+   std::queue<float*> frames_queued_ = {};
+   std::stack<float*> frames_unused_ = {};
+   std::mutex frames_mutex_ = {};
++  // audio_stats, touched by the device callback only.
++  uint32_t stats_played_ = 0;
++  uint32_t stats_silent_ = 0;
+ };
+ 
+ }  // namespace rex::audio::sdl
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
 index da8e432..4c57d1b 100644
 --- a/include/rex/graphics/command_processor.h
@@ -349,7 +373,7 @@ index 3bbd52e..d88fd1f 100644
    // update. 0 is depth, color starting from 1, nullptr if not bound.
    // Only valid for non-pixel-shader-interlock paths.
 diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
-index dce3dbf..832c785 100644
+index dce3dbf..b166090 100644
 --- a/include/rex/graphics/pipeline/shader/spirv_translator.h
 +++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
 @@ -88,6 +88,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
@@ -362,6 +386,30 @@ index dce3dbf..832c785 100644
      } pixel;
      uint64_t value = 0;
  
+@@ -472,6 +475,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
+ 
+   void StartTranslation() override;
+ 
++ public:
++  // Specialization constant (uint): bit N set when all the swizzled signs of texture fetch
++  // constant N are unsigned for the pipeline, so the shader doesn't need to read and handle
++  // them at run time. 0 keeps the run-time handling.
++  static constexpr uint32_t kSpecIdTextureUnsignedMask = 0;
++
++ protected:
++
+   std::vector<uint8_t> CompleteTranslation() override;
+ 
+   void PostTranslation() override;
+@@ -881,6 +892,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+     kSystemConstantEdramBlendConstant,
+   };
+   spv::Id uniform_system_constants_;
++  // kSpecIdTextureUnsignedMask, created on the first texture fetch.
++  spv::Id spec_texture_unsigned_mask_;
+   spv::Id uniform_float_constants_;
+   spv::Id uniform_bool_loop_constants_;
+   spv::Id uniform_fetch_constants_;
 diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
 index d26cd4f..72485a8 100644
 --- a/include/rex/graphics/pipeline/texture/cache.h
@@ -1405,6 +1453,25 @@ index 9d2a848..9ad77de 100644
    struct ArgsVkEndQuery {
      VkQueryPool query_pool;
      uint32_t query;
+diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics/vulkan/pipeline_cache.h
+index 7b938b9..1128295 100644
+--- a/include/rex/graphics/vulkan/pipeline_cache.h
++++ b/include/rex/graphics/vulkan/pipeline_cache.h
+@@ -200,8 +200,13 @@ class VulkanPipelineCache {
+     // Filled only for the attachments present in the render pass object.
+     PipelineRenderTarget render_targets[xenos::kMaxColorRenderTargets];
+ 
++    // SpirvShaderTranslator::kSpecIdTextureUnsignedMask for each shader: texture fetch
++    // constants used by the shader whose swizzled signs are all unsigned.
++    uint32_t vertex_texture_unsigned_mask;
++    uint32_t pixel_texture_unsigned_mask;
++
+     // Including all the padding, for a stable hash.
+-    static constexpr uint32_t kVersion = 0x20260228;
++    static constexpr uint32_t kVersion = 0x20261107;
+     PipelineDescription() {
+       Reset();
+     }
 diff --git a/include/rex/graphics/vulkan/primitive_processor.h b/include/rex/graphics/vulkan/primitive_processor.h
 index 35d58d3..ffc59ee 100644
 --- a/include/rex/graphics/vulkan/primitive_processor.h
@@ -2459,6 +2526,205 @@ index 56ee43b..2a35295 100644
  };
  
  }  // namespace vulkan
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+index 7a711a8..d77c5d4 100644
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -17,6 +17,7 @@
+ #include <rex/dbg.h>
+ #include <rex/logging.h>
+ #include <rex/math.h>
++#include <rex/platform.h>
+ #include <rex/memory/ring_buffer.h>
+ #include <rex/stream.h>
+ #include <rex/string/buffer.h>
+@@ -24,8 +25,22 @@
+ #include <rex/thread.h>
+ #include <rex/cvar.h>
+ 
++#include <chrono>
++
++REXCVAR_DEFINE_BOOL(audio_stats, false, "Audio",
++                    "Log every 5 seconds the audio frames the device played, the ones it got "
++                    "as silence because the game was late, and the game's audio callback time");
++
+ REXCVAR_DEFINE_INT32(
+-    audio_maxqframes, 8, "Audio",
++    audio_maxqframes,
++#if REX_PLATFORM_ANDROID
++    // The game's audio callback took up to 34 ms on a Poco F6 while 8 queued frames
++    // were down to 21-32 ms when the device pulled; 16 (85 ms) absorbs that.
++    16,
++#else
++    8,
++#endif
++    "Audio",
+     "Max buffered audio frames (range 4-64). Lower reduces latency but may cause stuttering.");
+ 
+ // As with normal Microsoft, there are like twelve different ways to access
+@@ -146,8 +161,27 @@ void AudioSystem::WorkerThreadMain() {
+         }
+         SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
+         uint64_t args[] = {client_callback_arg};
++        const auto callback_start = std::chrono::steady_clock::now();
+         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
+                                       rex::countof(args));
++        if (REXCVAR_GET(audio_stats)) {
++          static auto window_start = callback_start;
++          static uint32_t count = 0;
++          static double total_us = 0, max_us = 0;
++          const auto end = std::chrono::steady_clock::now();
++          const double us = std::chrono::duration<double, std::micro>(end - callback_start).count();
++          ++count;
++          total_us += us;
++          max_us = std::max(max_us, us);
++          const double window_s = std::chrono::duration<double>(end - window_start).count();
++          if (window_s >= 5.0) {
++            REXAPU_INFO("Audio stats: game callback {:.1f}/s, {:.0f} us avg, {:.0f} us max",
++                        count / window_s, total_us / count, max_us);
++            window_start = end;
++            count = 0;
++            total_us = max_us = 0;
++          }
++        }
+         if (diag_pump_count < 10) {
+           REXAPU_DEBUG("AudioWorker: callback returned for client {}", index);
+         }
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index 20a2cd8..559c2a4 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <array>
+ #include <cstring>
+ 
+@@ -187,6 +188,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+         sdl_callback_count++;
+       }
+       std::memset(data, 0, len);
++      ++driver->stats_silent_;
+       if (!SDL_PutAudioStreamData(stream, data, len)) {
+         REXAPU_ERROR("SDL_PutAudioStreamData() failed while filling silence: {}", SDL_GetError());
+         break;
+@@ -195,6 +197,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+     } else {
+       auto buffer = driver->frames_queued_.front();
+       driver->frames_queued_.pop();
++      ++driver->stats_played_;
+       if (REXCVAR_GET(audio_mute)) {
+         std::memset(data, 0, len);
+       } else {
+@@ -225,6 +228,26 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+     }
+   }
+   SDL_stack_free(data);
++
++  if (REXCVAR_GET(audio_stats)) {
++    static auto window_start = std::chrono::steady_clock::now();
++    const auto now = std::chrono::steady_clock::now();
++    const double window_s = std::chrono::duration<double>(now - window_start).count();
++    if (window_s >= 5.0) {
++      size_t queued;
++      {
++        std::unique_lock<std::mutex> guard(driver->frames_mutex_);
++        queued = driver->frames_queued_.size();
++      }
++      REXAPU_INFO("Audio stats: device {:.1f} frames/s, {:.1f} silent/s ({:.1f}%), {} queued",
++                  driver->stats_played_ / window_s, driver->stats_silent_ / window_s,
++                  100.0 * driver->stats_silent_ /
++                      std::max<uint32_t>(driver->stats_played_ + driver->stats_silent_, 1),
++                  queued);
++      window_start = now;
++      driver->stats_played_ = driver->stats_silent_ = 0;
++    }
++  }
+ }
+ 
+ }  // namespace rex::audio::sdl
+diff --git a/src/audio/sdl/sdl_audio_system.cpp b/src/audio/sdl/sdl_audio_system.cpp
+index 68da0cf..89d3503 100644
+--- a/src/audio/sdl/sdl_audio_system.cpp
++++ b/src/audio/sdl/sdl_audio_system.cpp
+@@ -12,9 +12,52 @@
+ #include <rex/audio/flags.h>
+ #include <rex/audio/sdl/sdl_audio_driver.h>
+ #include <rex/audio/sdl/sdl_audio_system.h>
++#include <rex/logging.h>
++
++#include <atomic>
++#include <chrono>
++#include <thread>
+ 
+ namespace rex::audio::sdl {
+ 
++namespace {
++
++// Without an audio device (none installed, no sound server), the game still needs its audio
++// callback paced as if one played: its audio code otherwise runs into unset state (a read of
++// guest address 0x3C on Linux without a sound server). Frames are consumed at the device rate
++// (256 samples at 48 kHz) and dropped.
++class SilentAudioDriver : public AudioDriver {
++ public:
++  SilentAudioDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore)
++      : AudioDriver(memory), semaphore_(semaphore), thread_([this] { Run(); }) {}
++  ~SilentAudioDriver() override {
++    running_ = false;
++    thread_.join();
++  }
++  void SubmitFrame(uint32_t) override { ++pending_; }
++
++ private:
++  void Run() {
++    constexpr auto kFrame = std::chrono::microseconds(256 * 1000000 / 48000);
++    auto next = std::chrono::steady_clock::now();
++    while (running_) {
++      next += kFrame;
++      std::this_thread::sleep_until(next);
++      uint32_t pending = pending_.load();
++      while (pending && !pending_.compare_exchange_weak(pending, pending - 1)) {
++      }
++      if (pending) semaphore_->Release(1, nullptr);
++    }
++  }
++
++  rex::thread::Semaphore* semaphore_;
++  std::atomic<uint32_t> pending_{0};
++  std::atomic<bool> running_{true};
++  std::thread thread_;
++};
++
++}  // namespace
++
+ std::unique_ptr<AudioSystem> SDLAudioSystem::Create(
+     runtime::FunctionDispatcher* function_dispatcher) {
+   return std::make_unique<SDLAudioSystem>(function_dispatcher);
+@@ -36,7 +79,9 @@ X_STATUS SDLAudioSystem::CreateDriver([[maybe_unused]] size_t index,
+   if (!driver->Initialize()) {
+     driver->Shutdown();
+     delete driver;
+-    return X_STATUS_UNSUCCESSFUL;
++    REXAPU_WARN("No audio device: the game runs without sound");
++    *out_driver = new SilentAudioDriver(memory_, semaphore);
++    return X_STATUS_SUCCESS;
+   }
+ 
+   *out_driver = driver;
+@@ -46,7 +91,10 @@ X_STATUS SDLAudioSystem::CreateDriver([[maybe_unused]] size_t index,
+ void SDLAudioSystem::DestroyDriver(AudioDriver* driver) {
+   assert_not_null(driver);
+   auto sdldriver = dynamic_cast<SDLAudioDriver*>(driver);
+-  assert_not_null(sdldriver);
++  if (!sdldriver) {
++    delete driver;
++    return;
++  }
+   sdldriver->Shutdown();
+   delete sdldriver;
+ }
 diff --git a/src/core/perf/counter.cpp b/src/core/perf/counter.cpp
 index 536009e..d435fe3 100644
 --- a/src/core/perf/counter.cpp
@@ -3102,10 +3368,18 @@ index 953c5fd..48622a4 100644
                                          uint32_t length_tiles,
                                          std::vector<Transfer>* transfers_append_out,
 diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
-index 1774f97..86240d8 100644
+index 1774f97..5d91450 100644
 --- a/src/graphics/pipeline/shader/spirv_translator.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator.cpp
-@@ -3210,7 +3210,12 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
+@@ -172,6 +172,7 @@ uint32_t SpirvShaderTranslator::GetModificationRegisterCount() const {
+ }
+ 
+ void SpirvShaderTranslator::StartTranslation() {
++  spec_texture_unsigned_mask_ = spv::NoResult;
+   // TODO(Triang3l): Logger.
+   builder_ = std::make_unique<SpirvBuilder>(features_.spirv_version, (kSpirvMagicToolId << 16) | 1,
+                                             nullptr);
+@@ -3210,7 +3211,12 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
              builder_->createAccessChain(spv::StorageClassInput, input_fragment_coordinates_,
                                          id_vector_temp_),
              spv::NoPrecision));
@@ -3119,7 +3393,7 @@ index 1774f97..86240d8 100644
        param_gen_x = builder_->createNoContractionBinOp(
            spv::OpFMul, type_float_, param_gen_x,
            builder_->makeFloatConstant(1.0f / float(draw_resolution_scale_x_)));
-@@ -3246,7 +3251,12 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
+@@ -3246,7 +3252,12 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
              builder_->createAccessChain(spv::StorageClassInput, input_fragment_coordinates_,
                                          id_vector_temp_),
              spv::NoPrecision));
@@ -3133,6 +3407,32 @@ index 1774f97..86240d8 100644
        param_gen_y = builder_->createNoContractionBinOp(
            spv::OpFMul, type_float_, param_gen_y,
            builder_->makeFloatConstant(1.0f / float(draw_resolution_scale_y_)));
+diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+index 9ce3bb4..fc978b0 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -1300,6 +1300,21 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+                                       id_vector_temp_),
+           spv::NoPrecision);
+       uint32_t swizzled_signs_word_offset = 8 * (fetch_constant_index & 3);
++      // Signs known to be all unsigned when the pipeline is created (see
++      // kSpecIdTextureUnsignedMask): a constant zero word after specialization.
++      if (spec_texture_unsigned_mask_ == spv::NoResult) {
++        spec_texture_unsigned_mask_ = builder_->makeUintConstant(0, true);
++        builder_->addDecoration(spec_texture_unsigned_mask_, spv::DecorationSpecId,
++                                int(kSpecIdTextureUnsignedMask));
++      }
++      swizzled_signs_word = builder_->createTriOp(
++          spv::OpSelect, type_uint_,
++          builder_->createBinOp(
++              spv::OpINotEqual, type_bool_,
++              builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, spec_texture_unsigned_mask_,
++                                    builder_->makeUintConstant(UINT32_C(1) << fetch_constant_index)),
++              builder_->makeUintConstant(0)),
++          builder_->makeUintConstant(0), swizzled_signs_word);
+ 
+       spv::Builder::TextureParameters texture_parameters = {};
+ 
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
 index 76f5600..10c04fb 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
@@ -9046,7 +9346,7 @@ index b49e033..7f280bb 100644
          auto& args = *reinterpret_cast<const ArgsVkEndQuery*>(stream);
          dfn.vkCmdEndQuery(command_buffer, args.query_pool, args.query);
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
-index 91ac08f..705b17e 100644
+index 91ac08f..8feb429 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
 @@ -29,6 +29,7 @@
@@ -9057,7 +9357,28 @@ index 91ac08f..705b17e 100644
  #include <rex/thread.h>
  #include <rex/memory.h>
  #include <rex/graphics/util/draw.h>
-@@ -981,6 +982,8 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
+@@ -36,6 +37,7 @@
+ #include <rex/graphics/pipeline_util.h>
+ #include <rex/graphics/pipeline/shader/spirv_builder.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
++#include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/register_file.h>
+ #include <rex/graphics/registers.h>
+ #include <rex/graphics/util/draw.h>
+@@ -55,6 +57,12 @@ REXCVAR_DEFINE_INT32(
+     .range(-1, 32)
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++REXCVAR_DEFINE_BOOL(vulkan_texture_sign_specialization, true, "GPU/Vulkan",
++                    "Create pipelines for the texture signs in use (all unsigned for most "
++                    "textures), so shaders sample each texture once instead of handling every "
++                    "sign at run time")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(vulkan_tessellation_wireframe, false, "GPU/Vulkan",
+                     "Render tessellation as wireframe")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -981,6 +989,8 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
      modification.pixel.param_gen_interpolator = param_gen_pos;
      modification.pixel.param_gen_point =
          uint32_t(regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type == xenos::PrimitiveType::kPointList);
@@ -9066,7 +9387,7 @@ index 91ac08f..705b17e 100644
    } else {
      modification.pixel.param_gen_enable = 0;
      modification.pixel.param_gen_interpolator = 0;
-@@ -1129,12 +1132,16 @@ bool VulkanPipelineCache::ConfigurePipeline(
+@@ -1129,12 +1139,16 @@ bool VulkanPipelineCache::ConfigurePipeline(
    if (it != pipelines_.end()) {
      VkPipeline found_pipeline = it->second.pipeline.load(std::memory_order_acquire);
      if (found_pipeline == VK_NULL_HANDLE) {
@@ -9083,7 +9404,7 @@ index 91ac08f..705b17e 100644
      }
      const PipelineLayoutProvider* found_pipeline_layout =
          it->second.pipeline_layout.load(std::memory_order_acquire);
-@@ -1148,6 +1155,7 @@ bool VulkanPipelineCache::ConfigurePipeline(
+@@ -1148,6 +1162,7 @@ bool VulkanPipelineCache::ConfigurePipeline(
    }
  
    // Create the pipeline if not already existing.
@@ -9091,6 +9412,73 @@ index 91ac08f..705b17e 100644
    auto& pipeline = *pipelines_.emplace(description, Pipeline()).first;
    PipelineCreationArguments creation_arguments_real;
    if (!TryGetPipelineCreationArgumentsForDescription(description, &pipeline,
+@@ -1376,6 +1391,21 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
+ 
+   description_out.vertex_shader_hash = vertex_shader->shader().ucode_data_hash();
+   description_out.vertex_shader_modification = vertex_shader->modification();
++  if (REXCVAR_GET(vulkan_texture_sign_specialization)) {
++    auto unsigned_mask = [&regs](const Shader& shader) {
++      uint32_t mask = 0;
++      for (const Shader::TextureBinding& binding : shader.texture_bindings()) {
++        if (!texture_util::SwizzleSigns(regs.GetTextureFetch(binding.fetch_constant))) {
++          mask |= UINT32_C(1) << binding.fetch_constant;
++        }
++      }
++      return mask;
++    };
++    description_out.vertex_texture_unsigned_mask = unsigned_mask(vertex_shader->shader());
++    if (pixel_shader) {
++      description_out.pixel_texture_unsigned_mask = unsigned_mask(pixel_shader->shader());
++    }
++  }
+   SpirvShaderTranslator::Modification vertex_shader_modification(
+       description_out.vertex_shader_modification);
+   Shader::HostVertexShaderType host_vertex_shader_type =
+@@ -3051,6 +3081,14 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+   std::array<VkPipelineShaderStageCreateInfo, 5> shader_stages;
+   uint32_t shader_stage_count = 0;
+ 
++  // Texture sign specialization of the guest shaders.
++  static const VkSpecializationMapEntry texture_unsigned_mask_entry = {
++      SpirvShaderTranslator::kSpecIdTextureUnsignedMask, 0, sizeof(uint32_t)};
++  VkSpecializationInfo vertex_specialization = {1, &texture_unsigned_mask_entry, sizeof(uint32_t),
++                                                &description.vertex_texture_unsigned_mask};
++  VkSpecializationInfo pixel_specialization = {1, &texture_unsigned_mask_entry, sizeof(uint32_t),
++                                               &description.pixel_texture_unsigned_mask};
++
+   // Vertex or tessellation evaluation shader (plus helper stages for tessellation).
+   assert_true(creation_arguments.vertex_shader->is_translated());
+   if (!creation_arguments.vertex_shader->is_valid()) {
+@@ -3090,7 +3128,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+     shader_stage_tess_eval.module = creation_arguments.vertex_shader->shader_module();
+     assert_true(shader_stage_tess_eval.module != VK_NULL_HANDLE);
+     shader_stage_tess_eval.pName = "main";
+-    shader_stage_tess_eval.pSpecializationInfo = nullptr;
++    shader_stage_tess_eval.pSpecializationInfo =
++        description.vertex_texture_unsigned_mask ? &vertex_specialization : nullptr;
+   } else {
+     VkPipelineShaderStageCreateInfo& shader_stage_vertex = shader_stages[shader_stage_count++];
+     shader_stage_vertex.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+@@ -3100,7 +3139,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+     shader_stage_vertex.module = creation_arguments.vertex_shader->shader_module();
+     assert_true(shader_stage_vertex.module != VK_NULL_HANDLE);
+     shader_stage_vertex.pName = "main";
+-    shader_stage_vertex.pSpecializationInfo = nullptr;
++    shader_stage_vertex.pSpecializationInfo =
++        description.vertex_texture_unsigned_mask ? &vertex_specialization : nullptr;
+   }
+   // Geometry shader.
+   if (creation_arguments.geometry_shader != VK_NULL_HANDLE) {
+@@ -3134,6 +3174,9 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+     }
+     shader_stage_fragment.module = creation_arguments.pixel_shader->shader_module();
+     assert_true(shader_stage_fragment.module != VK_NULL_HANDLE);
++    if (description.pixel_texture_unsigned_mask) {
++      shader_stage_fragment.pSpecializationInfo = &pixel_specialization;
++    }
+   } else {
+     if (edram_fragment_shader_interlock) {
+       shader_stage_fragment.module = depth_only_fragment_shader_;
 diff --git a/src/graphics/vulkan/primitive_processor.cpp b/src/graphics/vulkan/primitive_processor.cpp
 index cdbedae..cac3799 100644
 --- a/src/graphics/vulkan/primitive_processor.cpp
