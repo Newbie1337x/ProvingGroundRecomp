@@ -1,5 +1,6 @@
-// Native folder picker for the launcher: the system dialog on Windows, zenity or kdialog
-// elsewhere. Without one the launcher's path field still works.
+// Native folder picker for the launcher: the system dialog on Windows, kdialog or zenity
+// elsewhere. Without one the launcher's path field still works, and a "game" folder next to
+// the executable is found without asking.
 #include "pg_ui.h"
 
 #include <cstdio>
@@ -91,13 +92,21 @@ std::string Quote(const std::string& text) {
 }  // namespace
 
 std::optional<std::filesystem::path> PickFolder(const std::string& title) {
+  const std::string zenity =
+      "zenity --file-selection --directory --title=" + Quote(title) + " 2>/dev/null";
+  const std::string kdialog =
+      "kdialog --getexistingdirectory ~ --title " + Quote(title) + " 2>/dev/null";
+  // KDE's own dialog on KDE desktops (the Steam Deck's desktop mode has kdialog and usually no
+  // zenity), zenity elsewhere, then whichever of the two is installed.
+  const char* desktop = std::getenv("XDG_CURRENT_DESKTOP");
+  const bool kde = desktop && std::string(desktop).find("KDE") != std::string::npos;
+  const bool has_kdialog = HasCommand("kdialog");
+  const bool has_zenity = HasCommand("zenity");
   std::optional<std::string> picked;
-  if (HasCommand("zenity")) {
-    picked = RunPicker("zenity --file-selection --directory --title=" + Quote(title) +
-                       " 2>/dev/null");
-  } else if (HasCommand("kdialog")) {
-    picked = RunPicker("kdialog --getexistingdirectory ~ --title " + Quote(title) +
-                       " 2>/dev/null");
+  if (has_kdialog && (kde || !has_zenity)) {
+    picked = RunPicker(kdialog);
+  } else if (has_zenity) {
+    picked = RunPicker(zenity);
   }
   if (!picked) return std::nullopt;
   return std::filesystem::path(*picked);

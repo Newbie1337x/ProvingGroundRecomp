@@ -16,6 +16,17 @@ If you put the extracted game in a folder named `game` next to the executable, t
 finds it by itself. To skip the launcher on later starts, turn off **Show this window at
 startup**; start with `--launcher` to bring it back. Closing the launcher saves its settings.
 
+### Linux and Steam Deck (work in progress)
+
+The Linux build has not been tested on real hardware yet, and has no AMD FSR option. On a Steam
+Deck:
+
+1. In desktop mode, extract the game into a folder named `game` next to `ProvingGround`, so the
+   launcher finds it without the folder dialog. Browse... uses `kdialog` (included in the Deck's
+   desktop mode) or `zenity`.
+2. Start `./ProvingGround` once in desktop mode, check the options and press **Play**.
+3. In Steam, **Add a Non-Steam Game** and pick `ProvingGround` to play it in game mode.
+
 ## Options
 
 | Option | |
