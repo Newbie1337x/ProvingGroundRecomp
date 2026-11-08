@@ -12420,7 +12420,7 @@ index 8197bb4..bf5536a 100644
    for (const QueueFamily& queue_family : device->queue_families_) {
      max_enabled_queues_per_family =
 diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
-index 23645ef..a650f84 100644
+index 23645ef..2b40033 100644
 --- a/src/ui/vulkan/vulkan_presenter.cpp
 +++ b/src/ui/vulkan/vulkan_presenter.cpp
 @@ -11,6 +11,7 @@
@@ -12568,7 +12568,30 @@ index 23645ef..a650f84 100644
    paint_context_.DestroySwapchainAndVulkanSurface();
  
    // Await completion of the usage of everything before destroying anything
-@@ -274,7 +366,7 @@ bool VulkanPresenter::EnsureTemporalUpscalerContext(uint32_t render_width, uint3
+@@ -265,16 +357,28 @@ void VulkanPresenter::DestroyTemporalUpscalerContext() {
+ 
+ bool VulkanPresenter::EnsureTemporalUpscalerContext(uint32_t render_width, uint32_t render_height,
+                                                     uint32_t output_width, uint32_t output_height) {
+-  if (!temporal_upscaler_context_ || temporal_upscaler_max_render_width_ != render_width ||
+-      temporal_upscaler_max_render_height_ != render_height ||
++  // The render size is a maximum: a smaller input works with the same context. Recreating the
++  // context destroys resources the previous frame may still be using on the GPU (the input size
++  // changes whenever the 3D scene's own resolution does, native_main_pass_scale_sixteenths), so
++  // it is made for at least the output size and recreated only when the input outgrows it or
++  // the output changes.
++  if (!temporal_upscaler_context_ || render_width > temporal_upscaler_max_render_width_ ||
++      render_height > temporal_upscaler_max_render_height_ ||
+       temporal_upscaler_max_output_width_ != output_width ||
+       temporal_upscaler_max_output_height_ != output_height) {
++    if (temporal_upscaler_max_output_width_ == output_width &&
++        temporal_upscaler_max_output_height_ == output_height) {
++      render_width = std::max(render_width, temporal_upscaler_max_render_width_);
++      render_height = std::max(render_height, temporal_upscaler_max_render_height_);
++    }
++    render_width = std::max(render_width, output_width);
++    render_height = std::max(render_height, output_height);
+     DestroyTemporalUpscalerContext();
+ 
      ffxCreateContextDescUpscale create_desc = {};
      create_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
      create_desc.header.pNext = nullptr;
@@ -12577,7 +12600,7 @@ index 23645ef..a650f84 100644
      create_desc.maxRenderSize.width = render_width;
      create_desc.maxRenderSize.height = render_height;
      create_desc.maxUpscaleSize.width = output_width;
-@@ -417,6 +509,578 @@ bool VulkanPresenter::DispatchTemporalUpscaler(VkCommandBuffer command_buffer, V
+@@ -417,6 +521,578 @@ bool VulkanPresenter::DispatchTemporalUpscaler(VkCommandBuffer command_buffer, V
  }
  #endif
  
@@ -13156,7 +13179,7 @@ index 23645ef..a650f84 100644
  Surface::TypeFlags VulkanPresenter::GetSurfaceTypesSupportedByInstance(
      const VulkanInstance::Extensions& instance_extensions) {
    if (!instance_extensions.ext_KHR_surface) {
-@@ -754,6 +1418,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+@@ -754,6 +1430,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
    const VkDevice device = vulkan_device_->device();
  
    VkFormat new_swapchain_format;
@@ -13164,7 +13187,7 @@ index 23645ef..a650f84 100644
  
    // ConnectOrReconnectToSurfaceFromUIThread may be called only for the
    // ui::Surface of the current swapchain or when the old swapchain and
-@@ -764,16 +1429,25 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+@@ -764,16 +1441,25 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
    // awaiting completion of the usage of the swapchain and the surface on the
    // GPU.
    if (paint_context_.vulkan_surface != VK_NULL_HANDLE) {
@@ -13194,7 +13217,7 @@ index 23645ef..a650f84 100644
      if (paint_context_.swapchain == VK_NULL_HANDLE) {
        // Couldn't create the swapchain for the existing surface - start over.
        paint_context_.DestroySwapchainAndVulkanSurface();
-@@ -873,7 +1547,8 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+@@ -873,7 +1559,8 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
      paint_context_.swapchain = PaintContext::CreateSwapchainForVulkanSurface(
          vulkan_device_, paint_context_.vulkan_surface, new_surface_width, new_surface_height,
          VK_NULL_HANDLE, paint_context_.present_queue_family, new_swapchain_format,
@@ -13204,7 +13227,7 @@ index 23645ef..a650f84 100644
      if (paint_context_.swapchain == VK_NULL_HANDLE) {
        // Failed to create the swapchain for the new Vulkan surface - destroy the
        // Vulkan surface.
-@@ -885,6 +1560,23 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+@@ -885,6 +1572,23 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
      // Successfully attached (at least for now).
    }
  
@@ -13228,7 +13251,7 @@ index 23645ef..a650f84 100644
    // From now on, in case of failure,
    // paint_context_.DestroySwapchainAndVulkanSurface must be called before
    // returning.
-@@ -967,7 +1659,13 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+@@ -967,7 +1671,13 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
    for (;;) {
      uint32_t swapchain_image_count = uint32_t(paint_context_.swapchain_images.size());
      bool swapchain_images_were_empty = !swapchain_image_count;
@@ -13243,7 +13266,7 @@ index 23645ef..a650f84 100644
          device, paint_context_.swapchain, &swapchain_image_count,
          swapchain_images_were_empty ? nullptr : paint_context_.swapchain_images.data());
      // If the original swapchain image count was 0 (first call), SUCCESS is
-@@ -1041,6 +1739,9 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+@@ -1041,6 +1751,9 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
  }
  
  void VulkanPresenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
@@ -13253,7 +13276,7 @@ index 23645ef..a650f84 100644
    paint_context_.DestroySwapchainAndVulkanSurface();
  }
  
-@@ -1073,12 +1774,61 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
+@@ -1073,12 +1786,61 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
      image_instance.SetToNewImage(std::move(new_image), guest_output_image_next_version_++);
    }
  
@@ -13315,7 +13338,7 @@ index 23645ef..a650f84 100644
    }
    // Even if the refresher has returned false, it still might have submitted
    // some commands referencing the image. It's better to put an excessive
-@@ -1095,10 +1845,18 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
+@@ -1095,10 +1857,18 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
    {
      VulkanSubmissionTracker::FenceAcquisition fence_acqusition(
          guest_output_image_refresher_submission_tracker_.AcquireFenceToAdvanceSubmission());
@@ -13338,7 +13361,7 @@ index 23645ef..a650f84 100644
        fence_acqusition.SubmissionSucceededSignalFailed();
      }
    }
-@@ -1109,7 +1867,8 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
+@@ -1109,7 +1879,8 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
  VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
      const VulkanDevice* vulkan_device, VkSurfaceKHR surface, uint32_t width, uint32_t height,
      VkSwapchainKHR old_swapchain, uint32_t& present_queue_family_out, VkFormat& image_format_out,
@@ -13348,7 +13371,7 @@ index 23645ef..a650f84 100644
    ui_surface_unusable_out = false;
  
    const VulkanInstance::Functions& ifn = vulkan_device->vulkan_instance()->functions();
-@@ -1381,19 +2140,24 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+@@ -1381,19 +2152,24 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
    // interfering with GPU command processing, and also to allow tearing so
    // variable refresh rate may be used where it's available.
    // Note: If the priorities here are changes, update the cvar descriptions.
@@ -13376,7 +13399,7 @@ index 23645ef..a650f84 100644
               std::find(present_modes.cbegin(), present_modes.cend(),
                         VK_PRESENT_MODE_FIFO_RELAXED_KHR) != present_modes.cend()) {
      // Limiting the frame rate, but lets too long frames cause tearing not to
-@@ -1417,6 +2181,11 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+@@ -1417,6 +2193,11 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
        uint32_t(swapchain_create_info.imageFormat), uint32_t(swapchain_create_info.imageColorSpace),
        uint32_t(swapchain_create_info.presentMode));
  
@@ -13388,7 +13411,7 @@ index 23645ef..a650f84 100644
    present_queue_family_out = queue_family_index_present;
    image_format_out = swapchain_create_info.imageFormat;
    image_extent_out = swapchain_create_info.imageExtent;
-@@ -1445,12 +2214,28 @@ VkSwapchainKHR VulkanPresenter::PaintContext::PrepareForSwapchainRetirement() {
+@@ -1445,12 +2226,28 @@ VkSwapchainKHR VulkanPresenter::PaintContext::PrepareForSwapchainRetirement() {
    return old_swapchain;
  }
  
@@ -13400,7 +13423,7 @@ index 23645ef..a650f84 100644
 +void VulkanPresenter::PaintContext::DestroyRetiredSwapchain(VkSwapchainKHR old_swapchain) {
 +  if (old_swapchain == VK_NULL_HANDLE) {
 +    return;
-   }
++  }
 +#if defined(REX_HAS_FIDELITYFX_FRAMEGEN) && REX_HAS_FIDELITYFX_FRAMEGEN
 +  if (frame_generation_swapchain_context) {
 +    // Destroys the frame generation swapchain after its presents.
@@ -13411,7 +13434,7 @@ index 23645ef..a650f84 100644
 +    frame_generation_queue_present = nullptr;
 +    frame_generation_get_present_count = nullptr;
 +    return;
-+  }
+   }
 +#endif
 +  vulkan_device->functions().vkDestroySwapchainKHR(vulkan_device->device(), old_swapchain,
 +                                                   nullptr);
@@ -13422,7 +13445,7 @@ index 23645ef..a650f84 100644
    present_queue_family = UINT32_MAX;
    if (vulkan_surface != VK_NULL_HANDLE) {
      const VulkanInstance* vulkan_instance = vulkan_device->vulkan_instance();
-@@ -1463,6 +2248,16 @@ void VulkanPresenter::PaintContext::DestroySwapchainAndVulkanSurface() {
+@@ -1463,6 +2260,16 @@ void VulkanPresenter::PaintContext::DestroySwapchainAndVulkanSurface() {
  VulkanPresenter::GuestOutputImage::~GuestOutputImage() {
    const VulkanDevice::Functions& dfn = vulkan_device_->functions();
    const VkDevice device = vulkan_device_->device();
@@ -13439,7 +13462,7 @@ index 23645ef..a650f84 100644
    if (view_ != VK_NULL_HANDLE) {
      dfn.vkDestroyImageView(device, view_, nullptr);
    }
-@@ -1474,6 +2269,76 @@ VulkanPresenter::GuestOutputImage::~GuestOutputImage() {
+@@ -1474,6 +2281,76 @@ VulkanPresenter::GuestOutputImage::~GuestOutputImage() {
    }
  }
  
@@ -13516,7 +13539,7 @@ index 23645ef..a650f84 100644
  bool VulkanPresenter::GuestOutputImage::Initialize() {
    VkImageCreateInfo image_create_info;
    image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-@@ -1529,6 +2394,27 @@ bool VulkanPresenter::GuestOutputImage::Initialize() {
+@@ -1529,6 +2406,27 @@ bool VulkanPresenter::GuestOutputImage::Initialize() {
  }
  
  Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_drawers) {
@@ -13544,7 +13567,7 @@ index 23645ef..a650f84 100644
    // Begin the submission in place of the one not currently potentially used on
    // the GPU.
    uint64_t current_paint_submission_index =
-@@ -1569,9 +2455,15 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -1569,9 +2467,15 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
  
    VkSemaphore acquire_semaphore = paint_submission.acquire_semaphore();
    uint32_t swapchain_image_index;
@@ -13562,7 +13585,7 @@ index 23645ef..a650f84 100644
    switch (acquire_result) {
      case VK_SUCCESS:
      case VK_SUBOPTIMAL_KHR:
-@@ -1840,6 +2732,10 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -1840,6 +2744,10 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
                  swapchain_effect, paint_context_.swapchain_render_pass);
              if (swapchain_effect_pipeline.swapchain_pipeline == VK_NULL_HANDLE) {
                guest_output_flow.effect_count = 0;
@@ -13573,7 +13596,7 @@ index 23645ef..a650f84 100644
              }
            }
          }
-@@ -2027,7 +2923,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -2027,7 +2935,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
            uint32_t effect_constants_size = 0;
            union {
              BilinearConstants bilinear;
@@ -13582,7 +13605,7 @@ index 23645ef..a650f84 100644
              CasSharpenConstants cas_sharpen;
              CasResampleConstants cas_resample;
              FsrEasuConstants fsr_easu;
-@@ -2039,7 +2935,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -2039,7 +2947,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
                effect_constants_size = sizeof(effect_constants.bilinear);
                effect_constants.bilinear.Initialize(guest_output_flow, i);
              } break;
@@ -13591,7 +13614,7 @@ index 23645ef..a650f84 100644
              case kGuestOutputPaintPipelineLayoutIndexCasSharpen: {
                effect_constants_size = sizeof(effect_constants.cas_sharpen);
                effect_constants.cas_sharpen.Initialize(guest_output_flow, i,
-@@ -2070,6 +2966,22 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -2070,6 +2978,22 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
  
            dfn.vkCmdDraw(draw_command_buffer, 4, 1, 0, 0);
  
@@ -13614,7 +13637,7 @@ index 23645ef..a650f84 100644
            if (is_final_effect) {
              // Clear the letterbox around the guest output if the guest output
              // doesn't cover the entire swapchain image.
-@@ -2153,6 +3065,13 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -2153,6 +3077,13 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
  
    dfn.vkCmdEndRenderPass(draw_command_buffer);
  
@@ -13628,7 +13651,7 @@ index 23645ef..a650f84 100644
    dfn.vkEndCommandBuffer(draw_command_buffer);
  
    VkPipelineStageFlags acquire_semaphore_wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-@@ -2237,6 +3156,15 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -2237,6 +3168,15 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
    present_info.pImageIndices = &swapchain_image_index;
    present_info.pResults = nullptr;
    VkResult present_result;
@@ -13644,7 +13667,7 @@ index 23645ef..a650f84 100644
    {
      const VulkanDevice::Queue::Acquisition queue_acquisition =
          vulkan_device_->AcquireQueue(paint_context_.present_queue_family, 0);
-@@ -2334,7 +3262,7 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+@@ -2334,7 +3274,7 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
        case kGuestOutputPaintPipelineLayoutIndexBilinear:
          guest_output_paint_push_constant_range_ffx.size = sizeof(BilinearConstants);
          break;
@@ -13653,7 +13676,7 @@ index 23645ef..a650f84 100644
        case kGuestOutputPaintPipelineLayoutIndexCasSharpen:
          guest_output_paint_push_constant_range_ffx.size = sizeof(CasSharpenConstants);
          break;
-@@ -2389,7 +3317,7 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
+@@ -2389,7 +3329,7 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
          shader_module_create_info.codeSize = sizeof(shaders::guest_output_bilinear_dither_ps);
          shader_module_create_info.pCode = shaders::guest_output_bilinear_dither_ps;
          break;
