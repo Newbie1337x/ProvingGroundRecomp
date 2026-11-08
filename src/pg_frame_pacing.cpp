@@ -275,14 +275,32 @@ extern "C" void sub_824853A8(PPCContext& __restrict ctx, uint8_t* base) {
 // count at the real 60 Hz those scenes were held at 30 FPS. Inside the swap the getter returns a
 // private count that advances on every read, so these waits end at once; the cutscene cameras
 // and everything else still read the real count.
+//
+// The private count runs far ahead of the real one (it advances on every read). Switching to
+// 30 FPS in game then froze the picture: the swap waited for the real count to reach targets set
+// from the private one, longer the longer the game had run uncapped. With vsync the swap reads the
+// real count plus the lead the private count had, so its targets carry on from where they were;
+// switching back continues the private count from there.
 extern "C" void __imp__sub_8234BE28(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_8234BE28(PPCContext& __restrict ctx, uint8_t* base) {
+  static uint32_t swap_count = 0;
+  static uint32_t capped_lead = 0;
+  static bool lead_set = true;
   if (in_swap && Uncapped()) {
-    static uint64_t swap_count = 0;
+    lead_set = false;
     ctx.r3.u64 = ++swap_count;
     return;
   }
   __imp__sub_8234BE28(ctx, base);
+  if (in_swap) {
+    const uint32_t real = ctx.r3.u32;
+    if (!lead_set) {
+      capped_lead = int32_t(swap_count - real) > 0 ? swap_count - real : 0;
+      lead_set = true;
+    }
+    swap_count = real + capped_lead;
+    ctx.r3.u64 = swap_count;
+  }
 }
 
 // Havok physics step. Each frame sub_82418560 hands the physics thread (sub_8268D868) a step of
