@@ -2059,6 +2059,30 @@ index a570fa0..ec792aa 100644
    void SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer);
    void SetPresenterAndImmediateDrawer(Presenter* new_presenter,
                                        ImmediateDrawer* new_immediate_drawer) {
+diff --git a/include/rex/ui/overlay/achievement_toast.h b/include/rex/ui/overlay/achievement_toast.h
+index 7642601..c4c1402 100644
+--- a/include/rex/ui/overlay/achievement_toast.h
++++ b/include/rex/ui/overlay/achievement_toast.h
+@@ -35,6 +35,10 @@ class AchievementToastDialog : public AchievementNotificationDialog {
+   // Thread-safe: safe to call from any thread, including guest threads.
+   void Push(const rex::system::AchievementEvent& event) override;
+ 
++  // Always present; it repaints the window continuously only while a toast is shown, so an
++  // empty queue does not present the same frame hundreds of times a second.
++  bool WantsContinuousRepaint() const override;
++
+  protected:
+   void OnDraw(ImGuiIO& io) override;
+ 
+@@ -47,7 +51,7 @@ class AchievementToastDialog : public AchievementNotificationDialog {
+     std::optional<std::chrono::steady_clock::time_point> visible_since;
+   };
+ 
+-  std::mutex mutex_;
++  mutable std::mutex mutex_;
+   std::deque<PendingToast> queue_;
+   AchievementIconCache icon_cache_;
+ };
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
 index afb4a30..e0bba5d 100644
 --- a/include/rex/ui/presenter.h
@@ -12309,15 +12333,44 @@ index f270f3c..4889311 100644
        presenter_->RequestUIPaintFromUIThread();
      }
    }
+diff --git a/src/ui/overlay/achievement_toast.cpp b/src/ui/overlay/achievement_toast.cpp
+index 53b8c0b..0dbef1c 100644
+--- a/src/ui/overlay/achievement_toast.cpp
++++ b/src/ui/overlay/achievement_toast.cpp
+@@ -29,6 +29,11 @@ void AchievementToastDialog::Push(const rex::system::AchievementEvent& event) {
+   queue_.push_back({event, std::chrono::steady_clock::now()});
+ }
+ 
++bool AchievementToastDialog::WantsContinuousRepaint() const {
++  std::lock_guard<std::mutex> lock(mutex_);
++  return !queue_.empty();
++}
++
+ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
+   auto now = std::chrono::steady_clock::now();
+ 
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
-index 7360ed9..576664c 100644
+index 7360ed9..43bbd62 100644
 --- a/src/ui/presenter.cpp
 +++ b/src/ui/presenter.cpp
-@@ -40,11 +40,19 @@ REXCVAR_DEFINE_INT32(present_safe_area_y, 90, "UI/Presenter",
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <chrono>
+ #include <cctype>
+ #include <utility>
+ 
+@@ -40,11 +41,24 @@ REXCVAR_DEFINE_INT32(present_safe_area_y, 90, "UI/Presenter",
                       "Vertical safe area percentage (0-100)")
      .range(0, 100);
  
 -#if defined(REX_HAS_FIDELITYFX_SDK)
++REXCVAR_DEFINE_BOOL(present_stats, false, "UI/Presenter",
++                    "Log every 5 seconds how many times the window was presented, from the UI "
++                    "thread (with or without the UI drawn) and from the guest output thread")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
 +#if defined(REX_HAS_FFX_SPATIAL)
 +#if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
  REXCVAR_DEFINE_STRING(present_effect, "bilinear", "UI/Presenter",
@@ -12334,7 +12387,7 @@ index 7360ed9..576664c 100644
  
  REXCVAR_DEFINE_DOUBLE(present_cas_additional_sharpness,
                        rex::ui::Presenter::GuestOutputPaintConfig::kCasAdditionalSharpnessDefault,
-@@ -92,7 +100,7 @@ GuestOutputPaintConfig::Effect ParsePresentEffect(const std::string& effect_name
+@@ -92,7 +106,7 @@ GuestOutputPaintConfig::Effect ParsePresentEffect(const std::string& effect_name
    std::string lowered = effect_name;
    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
                   [](unsigned char c) { return char(std::tolower(c)); });
@@ -12343,7 +12396,7 @@ index 7360ed9..576664c 100644
    if (lowered == "cas") {
      return GuestOutputPaintConfig::Effect::kCas;
    }
-@@ -109,7 +117,7 @@ GuestOutputPaintConfig::Effect ParsePresentEffect(const std::string& effect_name
+@@ -109,7 +123,7 @@ GuestOutputPaintConfig::Effect ParsePresentEffect(const std::string& effect_name
    return GuestOutputPaintConfig::Effect::kBilinear;
  }
  
@@ -12352,7 +12405,7 @@ index 7360ed9..576664c 100644
  bool IsTemporalFsrCompatibilityEffect(GuestOutputPaintConfig::Effect effect) {
    return effect == GuestOutputPaintConfig::Effect::kFsr2 ||
           effect == GuestOutputPaintConfig::Effect::kFsr3;
-@@ -249,19 +257,19 @@ void LogTemporalFsrQualityModeInputLimitOnce() {
+@@ -249,19 +263,19 @@ void LogTemporalFsrQualityModeInputLimitOnce() {
          "guest output; using guest output size");
    }
  }
@@ -12375,7 +12428,48 @@ index 7360ed9..576664c 100644
    config.SetCasAdditionalSharpness(float(REXCVAR_GET(present_cas_additional_sharpness)));
    config.SetFsrMaxUpsamplingPasses(
        uint32_t(std::max(int32_t(1), REXCVAR_GET(present_fsr_max_upsampling_passes))));
-@@ -659,7 +667,7 @@ void Presenter::SetGuestOutputPaintConfigFromUIThread(const GuestOutputPaintConf
+@@ -415,6 +429,11 @@ void Presenter::OnSurfaceResizeFromUIThread() {
+   }
+ }
+ 
++namespace {
++std::atomic<uint32_t> g_present_stats_refreshes{0};
++std::atomic<uint32_t> g_ps_forced{0}, g_ps_requested{0}, g_ps_unrequested{0};
++}  // namespace
++
+ void Presenter::PaintFromUIThread(bool force_paint) {
+   // If there is no surface, this will be a no-op, nothing outdated, nothing to
+   // paint. However, an explicit monitor check is needed because UI framerate
+@@ -446,9 +465,14 @@ void Presenter::PaintFromUIThread(bool force_paint) {
+   // Reset ui_thread_paint_requested_ unconditionally also, regardless of
+   // whether the UI needs to be drawn - the flag may be set to try reconnecting,
+   // for example.
+-  if (ui_thread_paint_requested_.exchange(false, std::memory_order_relaxed)) {
++  const bool ps_requested = ui_thread_paint_requested_.exchange(false, std::memory_order_relaxed);
++  if (ps_requested) {
+     do_paint = true;
+   }
++  if (do_paint) {
++    (force_paint ? g_ps_forced : ps_requested ? g_ps_requested : g_ps_unrequested)
++        .fetch_add(1, std::memory_order_relaxed);
++  }
+   PaintResult paint_result = PaintResult::kNotPresented;
+   bool request_repaint_at_tick = false;
+   bool request_repaint_immediately = false;
+@@ -546,10 +570,12 @@ void Presenter::PaintFromUIThread(bool force_paint) {
+   }
+ }
+ 
++
+ bool Presenter::RefreshGuestOutput(
+     uint32_t frontbuffer_width, uint32_t frontbuffer_height, uint32_t display_aspect_ratio_x,
+     uint32_t display_aspect_ratio_y,
+     std::function<bool(GuestOutputRefreshContext& context)> refresher) {
++  g_present_stats_refreshes.fetch_add(1, std::memory_order_relaxed);
+   GuestOutputProperties& writable_properties =
+       guest_output_properties_[guest_output_mailbox_writable_];
+   writable_properties.frontbuffer_width = frontbuffer_width;
+@@ -659,7 +685,7 @@ void Presenter::SetGuestOutputPaintConfigFromUIThread(const GuestOutputPaintConf
      modified = true;
      request_repaint = true;
    }
@@ -12384,7 +12478,7 @@ index 7360ed9..576664c 100644
    if (guest_output_paint_config_.GetFsrSharpnessReduction() !=
        new_config.GetFsrSharpnessReduction()) {
      modified = true;
-@@ -684,7 +692,7 @@ void Presenter::SetGuestOutputPaintConfigFromUIThread(const GuestOutputPaintConf
+@@ -684,7 +710,7 @@ void Presenter::SetGuestOutputPaintConfigFromUIThread(const GuestOutputPaintConf
      modified = true;
      request_repaint = true;
    }
@@ -12393,7 +12487,7 @@ index 7360ed9..576664c 100644
    if (guest_output_paint_config_.GetFsrQualityMode() != new_config.GetFsrQualityMode()) {
      modified = true;
      if (new_config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr2 ||
-@@ -1030,7 +1038,7 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+@@ -1030,7 +1056,7 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
    uint32_t output_width_clamped = std::min(output_width, max_rt_width);
    uint32_t output_height_clamped = std::min(output_height, max_rt_height);
  
@@ -12402,7 +12496,7 @@ index 7360ed9..576664c 100644
    if (config.GetEffect() == GuestOutputPaintConfig::Effect::kCas ||
        config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr ||
        config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr2 ||
-@@ -1145,7 +1153,7 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+@@ -1145,7 +1171,7 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
                                                : GuestOutputPaintEffect::kCasResample;
      }
    }
@@ -12411,7 +12505,7 @@ index 7360ed9..576664c 100644
  
    std::pair<uint32_t, uint32_t>* last_pre_bilinear_effect_size =
        flow.effect_count ? &flow.effect_output_sizes[flow.effect_count - 1] : nullptr;
-@@ -1156,7 +1164,7 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+@@ -1156,7 +1182,7 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
      // Clamp the output size of the last effect to the maximum render target
      // size because it will go to an intermediate image now.
      if (last_pre_bilinear_effect_size) {
@@ -12420,7 +12514,7 @@ index 7360ed9..576664c 100644
        // RCAS only works for 1:1, clamping must be done explicitly for FSR.
        assert_false(flow.effects[flow.effect_count - 1] == GuestOutputPaintEffect::kFsrRcas &&
                     (last_pre_bilinear_effect_size->first > max_rt_width ||
-@@ -1188,7 +1196,7 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+@@ -1188,7 +1214,7 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
            last_effect = GuestOutputPaintEffect::kBilinearDither;
          }
          break;
@@ -12429,6 +12523,33 @@ index 7360ed9..576664c 100644
        case GuestOutputPaintEffect::kCasSharpen:
          last_effect = GuestOutputPaintEffect::kCasSharpenDither;
          break;
+@@ -1498,6 +1524,26 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
+   assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
+   assert_true(surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable);
+   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
++  if (REXCVAR_GET(present_stats)) {
++    static std::atomic<uint32_t> ui_with_drawers{0}, ui_without{0}, guest_thread{0};
++    static std::atomic<int64_t> window_start{0};
++    (is_in_ui_thread_paint_ ? (execute_ui_drawers ? ui_with_drawers : ui_without) : guest_thread)
++        .fetch_add(1, std::memory_order_relaxed);
++    const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
++    int64_t start = window_start.load(std::memory_order_relaxed);
++    if (!start) window_start.compare_exchange_strong(start, now);
++    const double seconds = double(now - start) * std::chrono::steady_clock::period::num /
++                           std::chrono::steady_clock::period::den;
++    if (start && seconds >= 5.0 && window_start.compare_exchange_strong(start, now)) {
++      REXLOG_INFO("Present stats: UI thread {:.1f}/s with UI, {:.1f}/s without; guest output "
++                  "thread {:.1f}/s; new guest frames {:.1f}/s; UI paints forced {:.1f}/s, requested "
++                  "{:.1f}/s, unrequested {:.1f}/s",
++                  ui_with_drawers.exchange(0) / seconds, ui_without.exchange(0) / seconds,
++                  guest_thread.exchange(0) / seconds,
++                  g_present_stats_refreshes.exchange(0) / seconds, g_ps_forced.exchange(0) / seconds,
++                  g_ps_requested.exchange(0) / seconds, g_ps_unrequested.exchange(0) / seconds);
++    }
++  }
+   switch (result) {
+     case PaintResult::kPresented:
+       surface_paint_connection_was_optimal_at_successful_paint_ = true;
 diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
 index 8197bb4..bf5536a 100644
 --- a/src/ui/vulkan/vulkan_device.cpp
