@@ -1712,30 +1712,13 @@ void GameMenu::OnDraw(ImGuiIO& io) {
       }
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Advanced")) {
-      ImGui::PushStyleColor(ImGuiCol_Text, ui::kMutedColor);
-      ImGui::TextWrapped("Renderer options for troubleshooting. The defaults are the fastest.");
-      ImGui::PopStyleColor();
-      dirty_ |= ui::ToggleSetting("Draw extents on CPU", "execute_unclipped_draw_vs_on_cpu",
-                     "Runs the vertex shader on the CPU for draws without a viewport, so render "
-                     "target copies only cover what was drawn (about 2.7 ms of GPU time per frame "
-                     "at 1440p).");
-      dirty_ |= ui::ToggleSetting("Threaded submission", "vulkan_async_submission",
-                     "Records and submits Vulkan command buffers on a separate thread.");
-      dirty_ |= ui::ToggleSetting("Early vblank after swap", "vblank_after_swap",
-                     "Without vsync, delivers the game's vblank as soon as a swap is processed.");
-      dirty_ |= ui::ToggleSetting("Real-time cutscene clock", "uncapped_real_time",
-                     "Keeps cutscenes at their original speed when the frame rate is above 30. "
-                     "Takes effect after a restart.");
-      ImGui::EndTabItem();
-    }
     if (ImGui::BeginTabItem("Performance")) {
       ImGui::PushStyleColor(ImGuiCol_Text, ui::kMutedColor);
       ImGui::TextWrapped(
-          "Shortcuts the native renderer takes past the emulated Xbox 360 GPU. All of them are "
-          "on by default and the image should not change; turn one off if you see a glitch, to "
-          "find which one causes it. Changes apply at once and last until the game closes. Vulkan "
-          "only.");
+          "Shortcuts past the emulated Xbox 360 GPU, most of them by the native renderer "
+          "(Vulkan). All are on by default and the image should not change; turn one off if you "
+          "see a glitch, to find which one causes it. Changes apply at once and last until the "
+          "game closes. Hover one for what it does.");
       ImGui::PopStyleColor();
       struct PerfToggle {
         const char* label;
@@ -1772,9 +1755,35 @@ void GameMenu::OnDraw(ImGuiIO& io) {
           {"Present only new frames", "swap_waits_for_new_frame",
            "Waits for the game's next frame instead of showing the last one again, for even "
            "frame pacing above 60 FPS."},
+          {"Draw extents on CPU", "execute_unclipped_draw_vs_on_cpu",
+           "Runs the vertex shader on the CPU for draws without a viewport, so render target "
+           "copies only cover what was drawn (about 2.7 ms of GPU time per frame at 1440p)."},
+          {"Threaded submission", "vulkan_async_submission",
+           "Records and submits Vulkan command buffers on a separate thread."},
+          {"Early vblank after swap", "vblank_after_swap",
+           "Without vsync, delivers the game's vblank as soon as a swap is processed."},
+          {"Real-time cutscene clock", "uncapped_real_time",
+           "Keeps cutscenes at their original speed above 30 FPS. Takes effect after a restart."},
       };
-      for (const auto& toggle : kPerfToggles) {
-        dirty_ |= ui::ToggleSetting(toggle.label, toggle.cvar, toggle.help);
+      if (ImGui::BeginTable("##perf", 2, ImGuiTableFlags_SizingStretchSame)) {
+        for (const auto& toggle : kPerfToggles) {
+          if (!rex::cvar::GetFlagInfo(toggle.cvar)) continue;
+          ImGui::TableNextColumn();
+          bool value = rex::cvar::Query<bool>(toggle.cvar);
+          ImGui::PushID(toggle.cvar);
+          if (ImGui::Checkbox(toggle.label, &value)) {
+            rex::cvar::SetFlagByName(toggle.cvar, value ? "true" : "false");
+            dirty_ = true;
+          }
+          if (ImGui::IsItemHovered() && ImGui::BeginTooltip()) {
+            ImGui::PushTextWrapPos(360.0f * s);
+            ImGui::TextUnformatted(toggle.help);
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+          }
+          ImGui::PopID();
+        }
+        ImGui::EndTable();
       }
       ImGui::EndTabItem();
     }
