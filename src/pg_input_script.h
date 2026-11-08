@@ -54,7 +54,7 @@ class PgInputScript final : public rex::input::InputDriver {
     int16_t thumb_lx = 0, thumb_ly = 0, thumb_rx = 0, thumb_ry = 0;
     bool operator==(const Pad&) const = default;
   };
-  enum class Kind { kPad, kMark, kMeasureStart, kMeasureStop, kQuit };
+  enum class Kind { kPad, kMark, kMeasureStart, kMeasureStop, kQuit, kSet };
   struct Event {
     uint32_t ms = 0;
     Kind kind = Kind::kPad;

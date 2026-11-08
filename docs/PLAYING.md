@@ -36,7 +36,8 @@ Deck:
 | Monitor | With more than one monitor: the one the game opens on. |
 | Frame rate | 30 FPS keeps the original console pacing. 60 and above run the game faster than the console could; cutscenes still play at their original speed. |
 | Renderer | Vulkan (main, fastest) or Direct3D 12 (Windows; the one with FSR 4). Changing it in the Insert menu applies on the next start. |
-| Internal resolution | What the game renders at: your screen's resolutions are listed, 1280 x 720 is the original. The game's image is 16:9 and fits inside the chosen size. With Vulkan the 3D scene renders at that size; some effects and the HUD at the nearest whole multiple of 720p (1080p: 1440p). Takes effect after a restart. |
+| Resolution | What the 3D scene renders at: your screen's resolutions are listed, 1280 x 720 is the original. The game's image is 16:9 and fits inside the chosen size. With Vulkan it changes at once in the Insert menu; with Direct3D 12 it follows Effects and HUD. |
+| Effects and HUD | What the effects (bloom, blur, the final image) and the HUD render at: 1x (720p), 2x (1440p), 3x (4K), or Automatic, the nearest one to the resolution. Lower is faster. Applies on the next start. |
 | Texture filtering | Anisotropic filtering, Off to 16x (4x by default): keeps the ground and ramps sharp into the distance. |
 | Anti-aliasing | Off, FXAA, or AMD FSR AA (FSR 3.1 with Vulkan, FSR 4 with Direct3D 12). FSR AA also takes the internal resolution to your screen. |
 | FSR version | In the Insert menu, with Direct3D 12 and FSR 4 AA: the FSR versions AMD's runtime offers on your GPU (for example 4.1.2, 3.1.5, 2.3.4). Newest is the default. |
@@ -44,9 +45,11 @@ Deck:
 | Button icons | Automatic, Xbox or PlayStation. See Controls. |
 | Show FPS counter | A small counter in the top-right corner. |
 
-Press **Insert** in game for the options menu. Renderer, resolution,
-anti-aliasing, FSR version and button icons apply on the next start; texture filtering and
-sharpness apply at once.
+Press **Insert** in game for the options menu. Renderer, effects and HUD, anti-aliasing, FSR
+version and button icons apply on the next start; resolution, texture filtering and sharpness
+apply at once. Its **Performance** tab lists the shortcuts the native renderer takes (all on by
+default); turning one off shows whether it causes a glitch you see. They reset when the game
+closes.
 
 About FSR: FSR 4 exists for Direct3D 12 only. With the Direct3D 12 renderer the game uses AMD's
 FSR 4 runtime, which picks the newest FSR the GPU driver supports: FSR 4.1 on Radeon RX 9000

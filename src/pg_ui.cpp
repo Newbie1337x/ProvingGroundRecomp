@@ -32,12 +32,17 @@
 #include "pg_frame_pacing.h"
 
 REXCVAR_DEFINE_STRING(render_resolution, "720p", "Video",
-                      "Internal rendering resolution, WIDTHxHEIGHT (for example 1920x1080; the "
-                      "older 720p, 1080p, 1440p and 4k also work). The game's 16:9 image is "
-                      "rendered at the largest size that fits: the main 3D pass at that size "
-                      "(Vulkan, in steps of 1/16 of 720p), the rest at the nearest whole multiple "
-                      "of 720p. Overridden by resolution_scale and "
-                      "native_main_pass_scale_sixteenths when those are set.")
+                      "Resolution of the 3D scene, WIDTHxHEIGHT (for example 1920x1080; the older "
+                      "720p, 1080p, 1440p and 4k also work). The game's 16:9 image is rendered at "
+                      "the largest size that fits, in steps of 1/16 of 720p (Vulkan; Direct3D 12 "
+                      "uses the effects scale). Changes in the options menu apply at once. "
+                      "Overridden by native_main_pass_scale_sixteenths when that is set.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_STRING(effects_resolution, "auto", "Video",
+                      "Scale of the effects (bloom, blur, final image) and the HUD, in multiples "
+                      "of 720p: 1, 2, 3, or auto (the nearest one to render_resolution). Takes "
+                      "effect after a restart. Overridden by resolution_scale when that is set.")
+    .allowed({"auto", "1", "2", "3"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(language, "auto", "General",
                       "Game language: auto (the system's, when the game has it, else English), en, "
@@ -69,8 +74,8 @@ constexpr uintmax_t kExpectedXexSize = 10366976;
 constexpr uint64_t kExpectedXexHash = 0xa02344935b47f717ull;
 
 // Settings written to the config file, in this order.
-constexpr std::array<const char*, 15> kSavedSettings = {
-    "game_data_root",    "renderer",         "render_resolution", "upscaler",
+constexpr std::array<const char*, 16> kSavedSettings = {
+    "game_data_root",    "renderer",         "render_resolution", "effects_resolution", "upscaler",
     "d3d12_fsr_version", "sharpness",        "anisotropic_override", "fullscreen",
     "monitor",           "frame_rate_limit", "swap_post_effect",  "button_prompts",
     "language",          "show_fps",         "show_launcher",
@@ -151,18 +156,37 @@ double RenderResolutionFactor() {
   return std::min(double(width) / 1280.0, double(height) / 720.0);
 }
 
-// The SDK's whole-number EDRAM scale (resolution_scale) for everything but the main 3D pass.
+// The SDK's whole-number EDRAM scale (resolution_scale) for the effects and the HUD: the setting,
+// or the nearest one to the 3D resolution.
 int32_t RenderResolutionScale() {
+  const std::string effects = REXCVAR_GET(effects_resolution);
+  if (effects == "1" || effects == "2" || effects == "3") return effects[0] - '0';
   return std::clamp(int32_t(std::lround(RenderResolutionFactor())), 1, 3);
 }
 
-// The main 3D pass at the chosen size (native_main_pass_scale_sixteenths, Vulkan only); 16 when
-// that is the same as the whole-number scale.
-uint32_t MainPassScaleSixteenths() {
+// resolution_scale the running game was started with (it cannot change while it runs).
+int32_t g_running_scale = 0;
+// Whether this file sets native_main_pass_scale_sixteenths from render_resolution (false when it
+// was set by hand).
+bool g_main_pass_from_resolution = false;
+
+// The 3D scene at the chosen size (native_main_pass_scale_sixteenths, Vulkan only), next to the
+// given whole-number scale; 16 when it is the same size as that scale.
+uint32_t MainPassScaleSixteenths(int32_t scale) {
   if (UsingD3D12()) return 16;
   const uint32_t sixteenths =
       uint32_t(std::clamp(std::lround(RenderResolutionFactor() * 16.0), 4l, 63l));
-  return sixteenths == uint32_t(RenderResolutionScale()) * 16 ? 16 : sixteenths;
+  return sixteenths == uint32_t(scale) * 16 ? 16 : sixteenths;
+}
+
+// While the game runs: the 3D scene follows render_resolution at once (the SDK rebuilds its
+// render targets at the new size on the next draw).
+void ApplyResolutionLive() {
+  if (!g_main_pass_from_resolution || !g_running_scale) return;
+  const uint32_t main_pass = MainPassScaleSixteenths(g_running_scale);
+  rex::cvar::SetFlagByName("native_main_pass_scale_sixteenths", std::to_string(main_pass));
+  REXLOG_INFO("Resolution {}: 3D scene at {}p", REXCVAR_GET(render_resolution),
+              720 * (main_pass == 16 ? uint32_t(g_running_scale) * 16 : main_pass) / 16);
 }
 
 // FSR's sharpness parameter: stops of reduction, 0 is the sharpest.
@@ -352,13 +376,18 @@ void ApplyStartupSettings() {
   }
   ApplyFrameRateLimit();
   ApplyUpscaler();
-  if (rex::cvar::HasNonDefaultValue("resolution_scale")) return;
+  if (rex::cvar::HasNonDefaultValue("resolution_scale")) {
+    g_running_scale = std::atoi(rex::cvar::GetFlagByName("resolution_scale").c_str());
+    return;
+  }
   const int32_t scale = RenderResolutionScale();
   rex::cvar::SetFlagByName("resolution_scale", std::to_string(scale));
+  g_running_scale = scale;
   uint32_t main_pass = 16;
   if (!rex::cvar::HasNonDefaultValue("native_main_pass_scale_sixteenths") &&
       rex::cvar::GetFlagInfo("native_main_pass_scale_sixteenths")) {
-    main_pass = MainPassScaleSixteenths();
+    g_main_pass_from_resolution = true;
+    main_pass = MainPassScaleSixteenths(scale);
     rex::cvar::SetFlagByName("native_main_pass_scale_sixteenths", std::to_string(main_pass));
   }
   REXLOG_INFO(
@@ -783,21 +812,35 @@ const std::vector<Choice> kAntiAliasing = {
 };
 
 constexpr const char* kResolutionHelp =
-    "Internal resolution: what the game renders at, before it is scaled to your screen (by FSR "
-    "when it is on). Higher values are sharper and cost more GPU time. The game's image is 16:9: "
-    "on other screens it fits inside the chosen size. With Vulkan the 3D scene renders at the "
-    "chosen size; some effects and the HUD still render at the nearest whole multiple of 720p.";
+    "What the 3D scene renders at, before it is scaled to your screen (by FSR when it is on). "
+    "Higher values are sharper and cost more GPU time. The game's image is 16:9: on other "
+    "screens it fits inside the chosen size. In game, changes apply at once (Vulkan).";
+constexpr const char* kEffectsResolutionHelp =
+    "What the effects (bloom, blur, the final image) and the HUD render at: 1x is 720p, 2x "
+    "1440p, 3x 4K. Automatic picks the nearest one to the resolution. Lower is faster; higher "
+    "makes the HUD and effects sharper. Takes effect after a restart.";
 
-// Internal resolution row. A setting saved with an older name (1080p...) is shown and kept as
-// WIDTHxHEIGHT.
+// Resolution row (the 3D scene). A setting saved with an older name (1080p...) is shown and
+// kept as WIDTHxHEIGHT.
 bool ResolutionSetting() {
   const std::string current = SettingValue("render_resolution", "720p");
   if (current.find('x') == std::string::npos) {
     const auto [width, height] = RenderResolutionSize(current);
     SetSetting("render_resolution", std::to_string(width) + "x" + std::to_string(height));
   }
-  return ComboSetting("Internal resolution", "render_resolution", ResolutionChoices(),
-                      kResolutionHelp);
+  return ComboSetting("Resolution", "render_resolution", ResolutionChoices(), kResolutionHelp);
+}
+
+// Effects and HUD scale row (resolution_scale; needs a restart).
+bool EffectsResolutionSetting() {
+  static std::string automatic;
+  const int32_t nearest = std::clamp(int32_t(std::lround(RenderResolutionFactor())), 1, 3);
+  automatic = "Automatic (" + std::to_string(nearest) + "x, " + std::to_string(720 * nearest) + "p)";
+  const std::vector<Choice> choices = {{"auto", automatic.c_str()},
+                                       {"1", "1x (720p, original)"},
+                                       {"2", "2x (1440p)"},
+                                       {"3", "3x (4K)"}};
+  return ComboSetting("Effects and HUD", "effects_resolution", choices, kEffectsResolutionHelp);
 }
 
 constexpr const char* kFrameRateHelp =
@@ -926,7 +969,17 @@ bool GraphicsSettings(bool in_game) {
   if (D3D12Available()) {
     changed |= ComboSetting("Renderer", "renderer", kRenderers, kRendererHelp);
   }
-  changed |= ResolutionSetting();
+  if (ResolutionSetting()) {
+    if (in_game) ApplyResolutionLive();
+    changed = true;
+  }
+  changed |= EffectsResolutionSetting();
+  if (in_game && g_running_scale && RenderResolutionScale() != g_running_scale) {
+    const std::string note = "Effects and HUD switch to " +
+                             std::to_string(RenderResolutionScale()) +
+                             "x the next time the game starts.";
+    MutedNote(note.c_str());
+  }
   changed |= ComboSetting("Texture filtering", "anisotropic_override", kTextureFiltering,
                           kTextureFilteringHelp);
   changed |= AntiAliasingSetting();
@@ -943,8 +996,8 @@ bool GraphicsSettings(bool in_game) {
   changed |= ToggleSetting("Show FPS counter", "show_fps", nullptr);
 
   if (in_game) {
-    MutedNote("Renderer, resolution, anti-aliasing and button icons apply the next "
-              "time the game starts.");
+    MutedNote("Renderer, effects and HUD, anti-aliasing and button icons apply the next time "
+              "the game starts; the resolution applies at once.");
   }
   return changed;
 }
@@ -1200,6 +1253,7 @@ void LauncherSettingsPage(LauncherState& state) {
   }
   if (D3D12Available()) ComboSetting("Renderer", "renderer", kRenderers, kRendererHelp);
   ResolutionSetting();
+  EffectsResolutionSetting();
   ComboSetting("Texture filtering", "anisotropic_override", kTextureFiltering,
                kTextureFilteringHelp, "3");
   AntiAliasingSetting();
@@ -1673,6 +1727,55 @@ void GameMenu::OnDraw(ImGuiIO& io) {
       dirty_ |= ui::ToggleSetting("Real-time cutscene clock", "uncapped_real_time",
                      "Keeps cutscenes at their original speed when the frame rate is above 30. "
                      "Takes effect after a restart.");
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Performance")) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ui::kMutedColor);
+      ImGui::TextWrapped(
+          "Shortcuts the native renderer takes past the emulated Xbox 360 GPU. All of them are "
+          "on by default and the image should not change; turn one off if you see a glitch, to "
+          "find which one causes it. Changes apply at once and last until the game closes. Vulkan "
+          "only.");
+      ImGui::PopStyleColor();
+      struct PerfToggle {
+        const char* label;
+        const char* cvar;
+        const char* help;
+      };
+      static constexpr PerfToggle kPerfToggles[] = {
+          {"Native model drawing", "native_mesh_draw",
+           "Draws the game's models straight from what the renderer learned the first time it "
+           "saw each one, instead of emulating every draw."},
+          {"Reuse model textures", "native_draw_replay",
+           "Reuses the textures and samplers of a model drawn again with the same ones."},
+          {"Reuse model state", "native_draw_fast",
+           "Reuses the pipeline and constants of a model drawn again in the same state."},
+          {"Keep model texture sets", "native_texture_sets",
+           "Keeps each model's texture bindings across frames instead of writing them again."},
+          {"Trust static model data", "gpu_trust_native_ranges",
+           "Checks the game's static model data once, not on every draw."},
+          {"Skip unchanged targets", "gpu_render_target_update_memo",
+           "Skips the render target setup when nothing about it changed since the last draw."},
+          {"Fast clears", "gpu_clear_as_render_target_clear",
+           "Clears the screen and depth directly instead of drawing the game's clear shapes."},
+          {"Direct copies to textures", "gpu_resolve_direct_texture",
+           "Copies finished images (reflections, shadows, effects) straight into the textures "
+           "that read them, without the emulated memory in between."},
+          {"Fewer render pass breaks", "native_hoist_texture_loads",
+           "Loads textures before a render pass instead of interrupting it (helps most on "
+           "phones and integrated GPUs)."},
+          {"Skip overwritten copies", "render_target_skip_overwritten_transfers",
+           "Doesn't copy old image contents that the next draw covers completely."},
+          {"Simpler texture shaders", "vulkan_texture_sign_specialization",
+           "Builds shaders for the texture formats really in use (applies to shaders built "
+           "from now on)."},
+          {"Present only new frames", "swap_waits_for_new_frame",
+           "Waits for the game's next frame instead of showing the last one again, for even "
+           "frame pacing above 60 FPS."},
+      };
+      for (const auto& toggle : kPerfToggles) {
+        dirty_ |= ui::ToggleSetting(toggle.label, toggle.cvar, toggle.help);
+      }
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("About")) {

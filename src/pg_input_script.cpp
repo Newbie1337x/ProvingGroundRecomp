@@ -189,6 +189,14 @@ bool PgInputScript::LoadLocked(const std::string& path) {
       event.kind = Kind::kMeasureStart;
     } else if (!std::strcmp(kind, "measure_stop")) {
       event.kind = Kind::kMeasureStop;
+    } else if (!std::strcmp(kind, "set")) {
+      // set <cvar> <value>: changes a setting at that time (for testing hot-reloadable ones).
+      event.kind = Kind::kSet;
+      event.text = rest;
+      event.text.erase(0, event.text.find_first_not_of(" \t"));
+      while (!event.text.empty() && (event.text.back() == '\r' || event.text.back() == '\n')) {
+        event.text.pop_back();
+      }
     } else if (!std::strcmp(kind, "quit")) {
       event.kind = Kind::kQuit;
     } else if (!std::strcmp(kind, "end")) {
@@ -303,6 +311,16 @@ void PgInputScript::FireLocked(const Event& event) {
       if (on_measure_) on_measure_(false);
       if (quit_on_measure_stop_ && request_quit_) request_quit_();
       break;
+    case Kind::kSet: {
+      const size_t space = event.text.find_first_of(" \t");
+      const std::string name = event.text.substr(0, space);
+      const std::string value =
+          space == std::string::npos ? "" : event.text.substr(event.text.find_first_not_of(" \t", space));
+      const bool set = rex::cvar::SetFlagByName(name, value);
+      REXLOG_INFO("Input script: set {} {}{}", name, value, set ? "" : " (failed)");
+      SetFrameMarker(kMarkOther, "set " + event.text);
+      break;
+    }
     case Kind::kQuit:
       SetFrameMarker(kMarkOther, "quit");
       if (request_quit_) request_quit_();
