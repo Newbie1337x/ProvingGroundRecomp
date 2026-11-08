@@ -27,14 +27,17 @@
 #include <shellapi.h>
 #endif
 
+#include <SDL3/SDL.h>
+
 #include "pg_frame_pacing.h"
 
 REXCVAR_DEFINE_STRING(render_resolution, "720p", "Video",
-                      "Internal rendering resolution. The game renders at 1280x720 and only "
-                      "integer scales are possible: 720p (1x), 1440p (2x), 4k (3x). 1080p "
-                      "renders at 1440p and is scaled down to the window. Overridden by "
-                      "resolution_scale when that is set.")
-    .allowed({"720p", "1080p", "1440p", "4k"})
+                      "Internal rendering resolution, WIDTHxHEIGHT (for example 1920x1080; the "
+                      "older 720p, 1080p, 1440p and 4k also work). The game's 16:9 image is "
+                      "rendered at the largest size that fits: the main 3D pass at that size "
+                      "(Vulkan, in steps of 1/16 of 720p), the rest at the nearest whole multiple "
+                      "of 720p. Overridden by resolution_scale and "
+                      "native_main_pass_scale_sixteenths when those are set.")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(language, "auto", "General",
                       "Game language: auto (the system's, when the game has it, else English), en, "
@@ -130,9 +133,36 @@ bool FsrAvailable() { return Fsr3Available() && (!UsingD3D12() || Fsr4RuntimePre
 
 bool FsrEnabled() { return REXCVAR_GET(upscaler) == "fsr" && FsrAvailable(); }
 
+// render_resolution as width and height: WIDTHxHEIGHT, or one of the older names.
+std::pair<int, int> RenderResolutionSize(const std::string& value) {
+  if (value == "1080p") return {1920, 1080};
+  if (value == "1440p") return {2560, 1440};
+  if (value == "4k") return {3840, 2160};
+  int width = 0, height = 0;
+  if (std::sscanf(value.c_str(), "%dx%d", &width, &height) == 2 && width >= 320 && height >= 180) {
+    return {width, height};
+  }
+  return {1280, 720};
+}
+
+// The game renders 16:9 at 1280x720: the factor that fits it into the chosen size.
+double RenderResolutionFactor() {
+  const auto [width, height] = RenderResolutionSize(REXCVAR_GET(render_resolution));
+  return std::min(double(width) / 1280.0, double(height) / 720.0);
+}
+
+// The SDK's whole-number EDRAM scale (resolution_scale) for everything but the main 3D pass.
 int32_t RenderResolutionScale() {
-  const std::string resolution = REXCVAR_GET(render_resolution);
-  return resolution == "4k" ? 3 : resolution == "1440p" || resolution == "1080p" ? 2 : 1;
+  return std::clamp(int32_t(std::lround(RenderResolutionFactor())), 1, 3);
+}
+
+// The main 3D pass at the chosen size (native_main_pass_scale_sixteenths, Vulkan only); 16 when
+// that is the same as the whole-number scale.
+uint32_t MainPassScaleSixteenths() {
+  if (UsingD3D12()) return 16;
+  const uint32_t sixteenths =
+      uint32_t(std::clamp(std::lround(RenderResolutionFactor() * 16.0), 4l, 63l));
+  return sixteenths == uint32_t(RenderResolutionScale()) * 16 ? 16 : sixteenths;
 }
 
 // FSR's sharpness parameter: stops of reduction, 0 is the sharpest.
@@ -325,8 +355,17 @@ void ApplyStartupSettings() {
   if (rex::cvar::HasNonDefaultValue("resolution_scale")) return;
   const int32_t scale = RenderResolutionScale();
   rex::cvar::SetFlagByName("resolution_scale", std::to_string(scale));
-  REXLOG_INFO("Rendering at {}p (resolution_scale {}), upscaler {}, screen height {}", 720 * scale,
-              scale, REXCVAR_GET(upscaler), DisplayHeight());
+  uint32_t main_pass = 16;
+  if (!rex::cvar::HasNonDefaultValue("native_main_pass_scale_sixteenths") &&
+      rex::cvar::GetFlagInfo("native_main_pass_scale_sixteenths")) {
+    main_pass = MainPassScaleSixteenths();
+    rex::cvar::SetFlagByName("native_main_pass_scale_sixteenths", std::to_string(main_pass));
+  }
+  REXLOG_INFO(
+      "Rendering for {}: main 3D pass at {}p, the rest at {}p (resolution_scale {}), upscaler "
+      "{}, screen height {}",
+      REXCVAR_GET(render_resolution), 720 * (main_pass == 16 ? scale * 16 : main_pass) / 16,
+      720 * scale, scale, REXCVAR_GET(upscaler), DisplayHeight());
 }
 
 void SetPresenterSource(std::function<rex::ui::Presenter*()> source) {
@@ -666,12 +705,73 @@ bool DisplayModeSetting() {
   });
 }
 
-const std::vector<Choice> kResolutions = {
-    {"720p", "1280 x 720 (original)"},
-    {"1080p", "1920 x 1080"},
-    {"1440p", "2560 x 1440"},
-    {"4k", "3840 x 2160 (4K)"},
-};
+// The resolutions of a monitor (SDL's fullscreen modes, without duplicates from other refresh
+// rates), largest first; the first entry is the monitor's own (desktop) resolution.
+std::vector<std::pair<int, int>> MonitorResolutions(int monitor_setting) {
+  std::vector<std::pair<int, int>> sizes;
+  if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) return sizes;
+  int count = 0;
+  if (SDL_DisplayID* displays = SDL_GetDisplays(&count)) {
+    SDL_DisplayID display = SDL_GetPrimaryDisplay();
+    if (monitor_setting >= 1 && monitor_setting <= count) display = displays[monitor_setting - 1];
+    if (const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(display)) {
+      sizes.push_back({desktop->w, desktop->h});
+    }
+    int mode_count = 0;
+    if (SDL_DisplayMode** modes = SDL_GetFullscreenDisplayModes(display, &mode_count)) {
+      for (int i = 0; i < mode_count; ++i) {
+        const std::pair<int, int> size{modes[i]->w, modes[i]->h};
+        if (size.first >= 640 && size.second >= 360 &&
+            std::find(sizes.begin(), sizes.end(), size) == sizes.end()) {
+          sizes.push_back(size);
+        }
+      }
+      SDL_free(modes);
+    }
+    SDL_free(displays);
+  }
+  SDL_QuitSubSystem(SDL_INIT_VIDEO);
+  if (sizes.size() > 1) {
+    std::sort(sizes.begin() + 1, sizes.end(), [](const auto& a, const auto& b) {
+      return a.first * a.second > b.first * b.second;
+    });
+  }
+  return sizes;
+}
+
+// Internal resolution choices: the monitor's resolutions, the original 1280x720, and the saved
+// value if it is none of those (another monitor's, or set by hand). Values are WIDTHxHEIGHT.
+const std::vector<Choice>& ResolutionChoices() {
+  static std::vector<std::pair<std::string, std::string>> storage;
+  static std::vector<Choice> choices;
+  static std::string cached_for;
+  const std::string monitor = SettingValue("monitor", "0");
+  const std::string current = SettingValue("render_resolution", "720p");
+  if (!choices.empty() && cached_for == monitor + "|" + current) return choices;
+  cached_for = monitor + "|" + current;
+  const auto sizes = MonitorResolutions(std::atoi(monitor.c_str()));
+  storage.clear();
+  auto add = [&](int width, int height, const char* note) {
+    const std::string value = std::to_string(width) + "x" + std::to_string(height);
+    for (const auto& entry : storage) {
+      if (entry.first == value) return;
+    }
+    std::string label = std::to_string(width) + " x " + std::to_string(height);
+    if (note) label += note;
+    storage.push_back({value, label});
+  };
+  for (size_t i = 0; i < sizes.size(); ++i) {
+    const bool original = sizes[i] == std::pair<int, int>{1280, 720};
+    add(sizes[i].first, sizes[i].second,
+        i == 0 ? (original ? " (screen, original)" : " (screen)") : original ? " (original)" : nullptr);
+  }
+  add(1280, 720, " (original)");
+  const auto [width, height] = RenderResolutionSize(current);
+  add(width, height, nullptr);
+  choices.clear();
+  for (const auto& entry : storage) choices.push_back({entry.first.c_str(), entry.second.c_str()});
+  return choices;
+}
 const std::vector<Choice> kFrameRates = {
     {"30", "30 FPS (original)"}, {"60", "60 FPS"},   {"120", "120 FPS"}, {"144", "144 FPS"},
     {"165", "165 FPS"},          {"240", "240 FPS"}, {"0", "Unlimited"},
@@ -684,8 +784,22 @@ const std::vector<Choice> kAntiAliasing = {
 
 constexpr const char* kResolutionHelp =
     "Internal resolution: what the game renders at, before it is scaled to your screen (by FSR "
-    "when Upscaling is on). Higher values are sharper and cost more GPU time. The game can render "
-    "at 720p, 1440p or 4K only; 1080p renders at 1440p.";
+    "when it is on). Higher values are sharper and cost more GPU time. The game's image is 16:9: "
+    "on other screens it fits inside the chosen size. With Vulkan the 3D scene renders at the "
+    "chosen size; some effects and the HUD still render at the nearest whole multiple of 720p.";
+
+// Internal resolution row. A setting saved with an older name (1080p...) is shown and kept as
+// WIDTHxHEIGHT.
+bool ResolutionSetting() {
+  const std::string current = SettingValue("render_resolution", "720p");
+  if (current.find('x') == std::string::npos) {
+    const auto [width, height] = RenderResolutionSize(current);
+    SetSetting("render_resolution", std::to_string(width) + "x" + std::to_string(height));
+  }
+  return ComboSetting("Internal resolution", "render_resolution", ResolutionChoices(),
+                      kResolutionHelp);
+}
+
 constexpr const char* kFrameRateHelp =
     "30 FPS keeps the original console pacing with vsync. Higher limits run the game uncapped "
     "up to that rate; cutscenes keep their original speed.";
@@ -812,7 +926,7 @@ bool GraphicsSettings(bool in_game) {
   if (D3D12Available()) {
     changed |= ComboSetting("Renderer", "renderer", kRenderers, kRendererHelp);
   }
-  changed |= ComboSetting("Internal resolution", "render_resolution", kResolutions, kResolutionHelp);
+  changed |= ResolutionSetting();
   changed |= ComboSetting("Texture filtering", "anisotropic_override", kTextureFiltering,
                           kTextureFilteringHelp);
   changed |= AntiAliasingSetting();
@@ -1085,7 +1199,7 @@ void LauncherSettingsPage(LauncherState& state) {
     });
   }
   if (D3D12Available()) ComboSetting("Renderer", "renderer", kRenderers, kRendererHelp);
-  ComboSetting("Internal resolution", "render_resolution", kResolutions, kResolutionHelp);
+  ResolutionSetting();
   ComboSetting("Texture filtering", "anisotropic_override", kTextureFiltering,
                kTextureFilteringHelp, "3");
   AntiAliasingSetting();

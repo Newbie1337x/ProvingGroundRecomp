@@ -36,7 +36,7 @@ Deck:
 | Monitor | With more than one monitor: the one the game opens on. |
 | Frame rate | 30 FPS keeps the original console pacing. 60 and above run the game faster than the console could; cutscenes still play at their original speed. |
 | Renderer | Vulkan (main, fastest) or Direct3D 12 (Windows; the one with FSR 4). Changing it in the Insert menu applies on the next start. |
-| Internal resolution | What the game renders at. 720p is the original. 1440p and 4K render at 2x and 3x; 1080p renders at 1440p. |
+| Internal resolution | What the game renders at: your screen's resolutions are listed, 1280 x 720 is the original. The game's image is 16:9 and fits inside the chosen size. With Vulkan the 3D scene renders at that size; some effects and the HUD at the nearest whole multiple of 720p (1080p: 1440p). Takes effect after a restart. |
 | Texture filtering | Anisotropic filtering, Off to 16x (4x by default): keeps the ground and ramps sharp into the distance. |
 | Anti-aliasing | Off, FXAA, or AMD FSR AA (FSR 3.1 with Vulkan, FSR 4 with Direct3D 12). FSR AA also takes the internal resolution to your screen. |
 | FSR version | In the Insert menu, with Direct3D 12 and FSR 4 AA: the FSR versions AMD's runtime offers on your GPU (for example 4.1.2, 3.1.5, 2.3.4). Newest is the default. |
