@@ -50,16 +50,16 @@ REXCVAR_DEFINE_STRING(language, "auto", "General",
     .allowed({"auto", "en", "fr", "de", "it", "es"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(renderer, "vulkan", "Video",
-                      "Renderer: vulkan or d3d12 (Windows builds with Direct3D 12). The upscaler "
-                      "is AMD FSR 3.1 on Vulkan and AMD FSR 4 on Direct3D 12.")
+                      "Renderer: vulkan or d3d12 (Windows builds with Direct3D 12).")
     .allowed({"vulkan", "d3d12"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(upscaler, "off", "Video",
                       "How the rendered image is scaled to the screen: off (bilinear) or fsr (AMD "
-                      "FSR: 3.1 with the Vulkan renderer, 4 with Direct3D 12)")
+                      "FSR; turned off in this version, fsr is ignored)")
     .allowed({"off", "fsr"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_INT32(sharpness, 30, "Video", "Upscaler sharpness, 0 to 100").range(0, 100);
+REXCVAR_DEFINE_INT32(sharpness, 0, "Video",
+                     "Sharpening (AMD FSR 1), 0 (off) to 100").range(0, 100);
 REXCVAR_DEFINE_BOOL(show_fps, false, "Video", "Show a frame rate counter in the corner");
 REXCVAR_DEFINE_BOOL(show_launcher, true, "General",
                     "Show the launcher at startup; it also appears when the game folder is not "
@@ -134,9 +134,27 @@ bool D3D12Available() {
 
 bool UsingD3D12() { return REXCVAR_GET(renderer) == "d3d12" && D3D12Available(); }
 
-bool FsrAvailable() { return Fsr3Available() && (!UsingD3D12() || Fsr4RuntimePresent()); }
+// FSR is turned off until it scales the 3D pass itself: the presenter runs it on the finished image,
+// already stretched to the effects and HUD size, so it cost GPU time and the picture looked the
+// same. With this false it is not offered and a saved upscaler = fsr is ignored.
+constexpr bool kFsrOffered = false;
 
-bool FsrEnabled() { return REXCVAR_GET(upscaler) == "fsr" && FsrAvailable(); }
+bool FsrAvailable() {
+  return kFsrOffered && Fsr3Available() && (!UsingD3D12() || Fsr4RuntimePresent());
+}
+
+int32_t RenderResolutionScale();
+// resolution_scale the running game was started with (it cannot change while it runs).
+int32_t g_running_scale = 0;
+
+// FSR gets the game's final image, which is 720p times the effects and HUD scale. Without motion
+// vectors or jitter it adds nothing at 1:1 (the image looked the same with it off) and still cost
+// over a millisecond a frame, so it is only offered when that image is smaller than the screen.
+// The scale is the running one in game, else the setting.
+bool FsrUseful(int32_t scale) { return uint32_t(720 * scale) < DisplayHeight(); }
+bool FsrUseful() { return FsrUseful(g_running_scale ? g_running_scale : RenderResolutionScale()); }
+
+bool FsrEnabled() { return REXCVAR_GET(upscaler) == "fsr" && FsrAvailable() && FsrUseful(); }
 
 // render_resolution as width and height: WIDTHxHEIGHT, or one of the older names.
 std::pair<int, int> RenderResolutionSize(const std::string& value) {
@@ -164,8 +182,6 @@ int32_t RenderResolutionScale() {
   return std::clamp(int32_t(std::lround(RenderResolutionFactor())), 1, 3);
 }
 
-// resolution_scale the running game was started with (it cannot change while it runs).
-int32_t g_running_scale = 0;
 // Whether this file sets native_main_pass_scale_sixteenths from render_resolution (false when it
 // was set by hand).
 bool g_main_pass_from_resolution = false;
@@ -191,6 +207,18 @@ void ApplyResolutionLive() {
 
 // FSR's sharpness parameter: stops of reduction, 0 is the sharpest.
 double FsrSharpnessReduction() { return 2.0 * (1.0 - REXCVAR_GET(sharpness) / 100.0); }
+
+// The sharpness slider without FSR 3/4: the presenter's AMD FSR 1, which upscales with EASU and
+// sharpens with RCAS when the game's image is smaller than the window, and sharpens with CAS at
+// the same size. Builds without FidelityFX have no FSR 1.
+bool SharpeningAvailable() {
+#if defined(REX_HAS_FFX_SPATIAL)
+  return true;
+#else
+  return false;
+#endif
+}
+bool SharpeningEnabled() { return SharpeningAvailable() && REXCVAR_GET(sharpness) > 0; }
 
 std::string TomlString(const std::string& value) {
   // Literal strings keep Windows backslashes as they are.
@@ -412,15 +440,24 @@ void ApplyUpscaler() {
   // runtime offers it. The cvars cover a presenter created later; the paint config changes the
   // running one.
   const bool fsr3 = FsrEnabled();
-  rex::cvar::SetFlagByName("present_effect", fsr3 ? "fsr3" : "bilinear");
+  const bool fsr1 = !fsr3 && SharpeningEnabled();
+  const double cas_sharpness = REXCVAR_GET(sharpness) / 100.0;
+  rex::cvar::SetFlagByName("present_effect", fsr3 ? "fsr3" : fsr1 ? "fsr" : "bilinear");
   if (fsr3) rex::cvar::SetFlagByName("present_fsr_quality_mode", "nativeaa");
   rex::cvar::SetFlagByName("present_fsr_sharpness_reduction",
                            std::to_string(FsrSharpnessReduction()));
+  if (SharpeningAvailable()) {
+    rex::cvar::SetFlagByName("present_cas_additional_sharpness", std::to_string(cas_sharpness));
+  }
   rex::ui::Presenter* presenter = g_presenter_source ? g_presenter_source() : nullptr;
   if (!presenter) return;
   using Config = rex::ui::Presenter::GuestOutputPaintConfig;
   Config config = presenter->GetGuestOutputPaintConfigFromUIThread();
   config.SetEffect(fsr3 ? Config::Effect::kFsr3 : Config::Effect::kBilinear);
+#if defined(REX_HAS_FFX_SPATIAL)
+  if (fsr1) config.SetEffect(Config::Effect::kFsr);
+  config.SetCasAdditionalSharpness(float(cas_sharpness));
+#endif
   if (fsr3) config.SetFsrQualityMode(Config::FsrQualityMode::kNativeAa);
   config.SetFsrSharpnessReduction(float(FsrSharpnessReduction()));
   presenter->SetGuestOutputPaintConfigFromUIThread(config);
@@ -851,7 +888,9 @@ constexpr const char* kAntiAliasingHelp =
     "resolution to your screen: FSR 3.1 with Vulkan, FSR 4 with Direct3D 12 (the newest FSR your "
     "GPU driver offers: FSR 4.1 on Radeon RX 9000 and 7000, and on RX 6000 with recent drivers).\n\n"
     "The game's renderer has no motion vectors or camera jitter to give FSR, so it works on each "
-    "frame on its own, without the temporal detail it adds in PC games.";
+    "frame on its own, without the temporal detail it adds in PC games. It can only be chosen "
+    "when Effects and HUD render below your screen's height: at the same size it changed nothing "
+    "and still cost GPU time.";
 constexpr const char* kFsrVersionHelp =
     "Which FSR from AMD's runtime to use; Newest is what AMD picks for your GPU.";
 
@@ -860,14 +899,21 @@ const std::vector<Choice> kRenderers = {
     {"d3d12", "Direct3D 12"},
 };
 constexpr const char* kRendererHelp =
-    "Vulkan is the main renderer and the fastest. Direct3D 12 is there for AMD FSR 4, which AMD "
-    "ships for Direct3D 12 only. Changing it restarts the game when you press Play.";
+    "Vulkan is the main renderer and the fastest. Direct3D 12 is the alternative if Vulkan "
+    "gives you trouble. Changing it restarts the game when you press Play.";
 // Anti-aliasing: the game's FXAA, or AMD FSR, which also takes the internal resolution to the
 // screen. Stored as swap_post_effect, and upscaler for FSR.
 bool AntiAliasingSetting() {
   std::vector<Choice> choices = kAntiAliasing;
+  // With the effects and HUD at the screen's size FSR has nothing to scale: listed, not selectable.
+  const bool fsr_useful = FsrUseful(RenderResolutionScale());
+  static std::string fsr_label;
   if (FsrAvailable()) {
-    choices.push_back({"fsr", UsingD3D12() ? "AMD FSR 4 AA" : "AMD FSR 3.1 AA"});
+    fsr_label = UsingD3D12() ? "AMD FSR 4 AA" : "AMD FSR 3.1 AA";
+    if (!fsr_useful) {
+      fsr_label += " (Effects and HUD below " + std::to_string(DisplayHeight()) + "p)";
+    }
+    choices.push_back({"fsr", fsr_label.c_str()});
   }
   const std::string current = FsrEnabled() ? "fsr" : SettingValue("swap_post_effect", "none");
   const char* preview = current.c_str();
@@ -879,7 +925,10 @@ bool AntiAliasingSetting() {
     if (ImGui::BeginCombo("##combo", preview)) {
       for (const auto& choice : choices) {
         const bool selected = current == choice.value;
-        if (ImGui::Selectable(choice.label, selected) && !selected) {
+        const bool disabled = std::string_view(choice.value) == "fsr" && !fsr_useful;
+        if (ImGui::Selectable(choice.label, selected,
+                              disabled ? ImGuiSelectableFlags_Disabled : 0) &&
+            !selected) {
           const bool fsr = std::string_view(choice.value) == "fsr";
           rex::cvar::SetFlagByName("upscaler", fsr ? "fsr" : "off");
           SetSetting("swap_post_effect", fsr ? "none" : choice.value);
@@ -945,8 +994,11 @@ constexpr const char* kButtonPromptsHelp =
 
 bool SharpnessSetting() {
   int value = REXCVAR_GET(sharpness);
-  return Row("Sharpness", "Sharpening strength of the upscaler. Changes apply immediately.", [&] {
-    if (!ImGui::SliderInt("##sharpness", &value, 0, 100, "%d%%")) return false;
+  return Row("Sharpness",
+             "AMD FSR 1 sharpening of the final image: 0 is off. When the game's image is smaller "
+             "than the window, FSR 1 also upscales it. Changes apply immediately.",
+             [&] {
+    if (!ImGui::SliderInt("##sharpness", &value, 0, 100, value ? "%d%%" : "Off")) return false;
     return rex::cvar::SetFlagByName("sharpness", std::to_string(value));
   });
 }
@@ -993,7 +1045,7 @@ bool GraphicsSettings(bool in_game) {
     changed |= ComboSetting("FSR version", "d3d12_fsr_version", FsrVersionChoices(),
                             kFsrVersionHelp);
   }
-  if (fsr && SharpnessSetting()) {
+  if ((fsr || SharpeningAvailable()) && SharpnessSetting()) {
     ApplyUpscaler();
     changed = true;
   }
@@ -1001,8 +1053,10 @@ bool GraphicsSettings(bool in_game) {
   changed |= ToggleSetting("Show FPS counter", "show_fps", nullptr);
 
   if (in_game) {
-    MutedNote("Renderer, effects and HUD, FXAA and button icons apply the next time the game "
-              "starts; the resolution and AMD FSR apply at once.");
+    MutedNote(FsrAvailable() ? "Renderer, effects and HUD, FXAA and button icons apply the next "
+                               "time the game starts; the resolution and AMD FSR apply at once."
+                             : "Renderer, effects and HUD, FXAA and button icons apply the next "
+                               "time the game starts; the resolution and sharpness apply at once.");
   }
   return changed;
 }
@@ -1262,7 +1316,7 @@ void LauncherSettingsPage(LauncherState& state) {
   ComboSetting("Texture filtering", "anisotropic_override", kTextureFiltering,
                kTextureFilteringHelp, "3");
   AntiAliasingSetting();
-  if (FsrEnabled()) SharpnessSetting();
+  if (FsrEnabled() || SharpeningAvailable()) SharpnessSetting();
   EndCard();
 }
 
