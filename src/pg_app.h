@@ -14,6 +14,7 @@
 #include <rex/ui/keybinds.h>
 #include <rex/ui/overlay/debug_overlay.h>
 
+#include "pg_frame_pacing.h"
 #include "pg_input_script.h"
 #include "pg_sampler.h"
 #include "pg_ui.h"
@@ -163,8 +164,10 @@ class PgApp : public rex::ReXApp {
     }
     const std::string timeline_path = REXCVAR_GET(timeline_trace);
     if (!timeline_path.empty()) rex::perf::TimelineSetPath(timeline_path);
-    if (sampler_ || !timeline_path.empty()) {
+    const bool pacing_trace = !REXCVAR_QUERY(std::string, pacing_trace_csv).empty();
+    if (sampler_ || !timeline_path.empty() || pacing_trace) {
       auto set_active = [this](bool active) {
+        pg::SetPacingTraceActive(active);
         if (sampler_) sampler_->SetActive(active);
         rex::perf::TimelineSetActive(active);
         // The title hard-exits the process, so OnShutdown may never run.

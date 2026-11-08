@@ -60,7 +60,13 @@ class PgInputScript final : public rex::input::InputDriver {
     Kind kind = Kind::kPad;
     Pad pad;
     std::string text;
+    // The command as written in the file, for input_replay_rewrite.
+    std::string line;
   };
+  // What a script's times count: v1 files guest milliseconds since the first poll, v2 files the
+  // engine's game time since then, which stops while the game loads, so a route replays the
+  // same on a slower device or at another frame rate.
+  enum class Clock { kGuest, kEngine };
 
   PgInputScript(rex::input::InputSystem* system, Mode mode, std::function<void()> request_quit,
                 bool quit_on_measure_stop);
@@ -76,6 +82,9 @@ class PgInputScript final : public rex::input::InputDriver {
   Mode mode_;
   std::function<void()> request_quit_;
   bool quit_on_measure_stop_;
+  Clock clock_ = Clock::kEngine;
+  // Replay only: the script written again with engine times (input_replay_rewrite).
+  std::FILE* rewrite_ = nullptr;
   std::function<void(bool)> on_measure_;
 
   std::mutex mutex_;
