@@ -982,7 +982,12 @@ bool GraphicsSettings(bool in_game) {
   }
   changed |= ComboSetting("Texture filtering", "anisotropic_override", kTextureFiltering,
                           kTextureFilteringHelp);
-  changed |= AntiAliasingSetting();
+  if (AntiAliasingSetting()) {
+    // FSR is the presenter's paint effect, which changes at once; FXAA is the GPU's and needs a
+    // restart.
+    if (in_game) ApplyUpscaler();
+    changed = true;
+  }
   const bool fsr = FsrEnabled();
   if (fsr && UsingD3D12() && !rex::cvar::GetFlagByName("d3d12_fsr_versions").empty()) {
     changed |= ComboSetting("FSR version", "d3d12_fsr_version", FsrVersionChoices(),
@@ -996,8 +1001,8 @@ bool GraphicsSettings(bool in_game) {
   changed |= ToggleSetting("Show FPS counter", "show_fps", nullptr);
 
   if (in_game) {
-    MutedNote("Renderer, effects and HUD, anti-aliasing and button icons apply the next time "
-              "the game starts; the resolution applies at once.");
+    MutedNote("Renderer, effects and HUD, FXAA and button icons apply the next time the game "
+              "starts; the resolution and AMD FSR apply at once.");
   }
   return changed;
 }
