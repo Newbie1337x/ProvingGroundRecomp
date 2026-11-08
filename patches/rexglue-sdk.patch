@@ -2031,6 +2031,22 @@ index 0000000..85e64d9
 +FrameGenerationStats GetFrameGenerationStats();
 +
 +}  // namespace rex::ui
+diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
+index a7ab6b3..fb3dafc 100644
+--- a/include/rex/ui/imgui_dialog.h
++++ b/include/rex/ui/imgui_dialog.h
+@@ -39,6 +39,11 @@ class ImGuiDialog {
+ 
+   void Draw();
+ 
++  // Whether the window is repainted continuously while this dialog exists (to follow the mouse
++  // and keyboard). A passive overlay returns false: it is then drawn with each new guest frame
++  // only, instead of the window presenting the same frame again hundreds of times a second.
++  virtual bool WantsContinuousRepaint() const { return true; }
++
+  protected:
+   ImGuiDialog(ImGuiDrawer* imgui_drawer);
+ 
 diff --git a/include/rex/ui/imgui_drawer.h b/include/rex/ui/imgui_drawer.h
 index a570fa0..ec792aa 100644
 --- a/include/rex/ui/imgui_drawer.h
@@ -12258,6 +12274,41 @@ index 306118e..72442d1 100644
    // Initialize static guest output painting objects.
  
    // Guest output painting root signatures.
+diff --git a/src/ui/imgui_drawer.cpp b/src/ui/imgui_drawer.cpp
+index f270f3c..4889311 100644
+--- a/src/ui/imgui_drawer.cpp
++++ b/src/ui/imgui_drawer.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
+ #include <cfloat>
+ #include <cstring>
+ #include <filesystem>
+@@ -19,6 +20,8 @@
+ #include <rex/logging.h>
+ #include <rex/ui/imgui_dialog.h>
+ #include <rex/ui/imgui_drawer.h>
++
++#include <algorithm>
+ #include <rex/ui/ui_event.h>
+ #include <rex/ui/window.h>
+ 
+@@ -439,7 +442,12 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+   if (!dialogs_.empty()) {
+     // Repaint (and handle input) continuously if still active. In detached mode
+     // there is no presenter; the app drives repaint via its own present loop.
+-    if (presenter_) {
++    // Passive overlays (WantsContinuousRepaint false) are drawn with the guest
++    // frames only.
++    const bool continuous = std::any_of(dialogs_.begin(), dialogs_.end(), [](ImGuiDialog* dialog) {
++      return dialog->WantsContinuousRepaint();
++    });
++    if (presenter_ && continuous) {
+       presenter_->RequestUIPaintFromUIThread();
+     }
+   }
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
 index 7360ed9..576664c 100644
 --- a/src/ui/presenter.cpp

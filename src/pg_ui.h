@@ -128,6 +128,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 class FpsOverlay final : public rex::ui::ImGuiDialog {
  public:
   explicit FpsOverlay(rex::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {}
+  // Updated with the game's frames; repainting the window continuously for it presented the
+  // same frame (with FSR) a few hundred times a second.
+  bool WantsContinuousRepaint() const override { return false; }
 
  protected:
   void OnDraw(ImGuiIO& io) override;
