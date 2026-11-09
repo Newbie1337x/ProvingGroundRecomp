@@ -30,6 +30,7 @@
 #include <SDL3/SDL.h>
 
 #include "pg_frame_pacing.h"
+#include "pg_menu_input.h"
 
 REXCVAR_DEFINE_STRING(render_resolution, "720p", "Video",
                       "Resolution of the 3D scene, WIDTHxHEIGHT (for example 1920x1080; the older "
@@ -1695,8 +1696,9 @@ void Launcher::OnDraw(ImGuiIO& io) {
     rex::cvar::SetFlagByName("show_launcher", show ? "true" : "false");
   }
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("Start the game directly next time. Press Insert in game to change "
-                      "options, or start with --launcher to see this screen again.");
+    ImGui::SetTooltip("Start the game directly next time. Press Insert (or View + Menu on a "
+                      "controller) in game to change options, or start with --launcher to see "
+                      "this screen again.");
   }
 
   ImGui::Dummy(ImVec2(0, 8 * s));
@@ -1716,7 +1718,7 @@ void Launcher::OnDraw(ImGuiIO& io) {
 
   ui::PushFont(ui::g_small);
   ImGui::PushStyleColor(ImGuiCol_Text, ui::kMutedColor);
-  ImGui::TextUnformatted("In game: Insert opens the options menu.");
+  ImGui::TextUnformatted("In game: Insert, or View + Menu on a controller, opens the options menu.");
   ImGui::PopStyleColor();
   ImGui::PopFont();
   ImGui::End();
@@ -1736,15 +1738,23 @@ GameMenu::GameMenu(rex::ui::ImGuiDrawer* drawer, std::filesystem::path config_pa
     : ImGuiDialog(drawer), config_path_(std::move(config_path)), on_close_(std::move(on_close)) {}
 
 GameMenu::~GameMenu() {
+  ReleaseMenuGamepad(GetIO());
   if (dirty_) SaveSettings(config_path_);
 }
 
 void GameMenu::OnDraw(ImGuiIO& io) {
   using ui::g_scale;
   const float s = g_scale;
+  // The controllers drive the menu while it is open (the game sees them untouched).
+  FeedMenuGamepad(io);
   const float width = std::min(560.0f * s, io.DisplaySize.x - 32.0f * s);
   ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
                           ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+  // Focused when it opens, so the controller moves through it without a click first.
+  if (!focused_) {
+    ImGui::SetNextWindowFocus();
+    focused_ = true;
+  }
   ImGui::SetNextWindowSize(ImVec2(width, 0), ImGuiCond_Always);
   bool open = true;
   ImGui::Begin("Options##pg_menu", &open,
@@ -1827,8 +1837,6 @@ void GameMenu::OnDraw(ImGuiIO& io) {
            "Records and submits Vulkan command buffers on a separate thread."},
           {"Early vblank after swap", "vblank_after_swap",
            "Without vsync, delivers the game's vblank as soon as a swap is processed."},
-          {"Real-time cutscene clock", "uncapped_real_time",
-           "Keeps cutscenes at their original speed above 30 FPS. Takes effect after a restart."},
       };
       if (ImGui::BeginTable("##perf", 2, ImGuiTableFlags_SizingStretchSame)) {
         for (const auto& toggle : kPerfToggles) {
@@ -1859,6 +1867,7 @@ void GameMenu::OnDraw(ImGuiIO& io) {
       ImGui::Dummy(ImVec2(0, 4 * s));
       ImGui::PushStyleColor(ImGuiCol_Text, ui::kMutedColor);
       ImGui::TextUnformatted("Insert            Options menu");
+      ImGui::TextUnformatted("View + Menu       Options menu (controller; Menu closes it)");
       ImGui::TextUnformatted("F11               Fullscreen");
       ImGui::PopStyleColor();
       ImGui::EndTabItem();

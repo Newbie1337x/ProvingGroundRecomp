@@ -35,9 +35,9 @@ Not tested on a handheld yet. What to expect on a ROG Xbox Ally / Ally X:
   finds it without the folder dialog or typing a path.
 - The launcher can be used with the built-in controller (D-pad or stick to move, A to change a
   setting, B to close a list, Start to play) or with the touch screen.
-- **The in-game options menu opens with the Insert key only.** Choose your settings in the
-  launcher, or open the Windows On-Screen Keyboard (`osk.exe`, which has an Ins key) if you
-  need the menu while playing.
+- In game, press **View + Menu** together (Back + Start on older controllers) to open the
+  options menu. Move with the D-pad or left stick, change a setting with A, close a list with
+  B, and press Menu (Start) or choose Resume to return to the game. While the menu is open the game doesn't see the controller.
 - Suggested settings for the 1080p 120 Hz screen: Resolution 1920 x 1080 or 1280 x 720, Effects
   and HUD 1x, Sharpness about 50%, and a frame rate of 40 or 60 FPS (both divide 120 Hz evenly).
   Effects and HUD on Automatic picks 2x at 1080p, which renders them at 1440p and costs GPU time
@@ -62,7 +62,8 @@ Not tested on a handheld yet. What to expect on a ROG Xbox Ally / Ally X:
 | Button icons | Automatic, Xbox or PlayStation. See Controls. |
 | Show FPS counter | A small counter in the top-right corner. |
 
-Press **Insert** in game for the options menu. Renderer, effects and HUD, anti-aliasing and button
+Press **Insert** in game, or **View + Menu** (Back + Start) together on a controller, for the
+options menu. Renderer, effects and HUD, anti-aliasing and button
 icons apply on the next start; resolution, texture filtering and sharpness apply at once. Its
 **Performance** tab lists the shortcuts the native renderer takes (all on by default); turning
 one off shows whether it causes a glitch you see. They reset when the game closes.
