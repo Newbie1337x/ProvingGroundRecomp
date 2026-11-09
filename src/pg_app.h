@@ -16,6 +16,7 @@
 
 #include "pg_frame_pacing.h"
 #include "pg_input_script.h"
+#include "pg_menu_input.h"
 #include "pg_sampler.h"
 #include "pg_ui.h"
 
@@ -151,6 +152,11 @@ class PgApp : public rex::ReXApp {
   }
 
   void OnPostSetup() override {
+    // View + Menu on a controller opens the options menu (no keyboard on handhelds).
+    pg::InstallMenuInput(
+        static_cast<rex::input::InputSystem*>(runtime()->input_system()), [this](bool open) {
+          app_context().CallInUIThread([this, open] { SetMenuOpen(open); });
+        });
     const std::string sample_path = REXCVAR_GET(sample_profile);
     if (!sample_path.empty()) {
       sampler_ = std::make_unique<PgSampler>(sample_path, REXCVAR_GET(sample_period_ms));
@@ -247,15 +253,9 @@ class PgApp : public rex::ReXApp {
         rex::ui::UnregisterBind(bind);
       }
     }
-    rex::ui::RegisterBind("bind_pg_menu", "Insert", "Toggle the options menu", [this, drawer] {
-      if (menu_) {
-        CloseMenu();
-      } else {
-        menu_ = std::make_unique<pg::GameMenu>(drawer, config_path_, [this] {
-          app_context().CallInUIThreadDeferred([this] { CloseMenu(); });
-        });
-      }
-    });
+    drawer_ = drawer;
+    rex::ui::RegisterBind("bind_pg_menu", "Insert", "Toggle the options menu",
+                          [this] { SetMenuOpen(!menu_); });
     rex::ui::RegisterBind("bind_pg_fullscreen", "F11", "Toggle fullscreen", [this] {
       const bool fullscreen = rex::cvar::Query<bool>("fullscreen");
       rex::cvar::SetFlagByName("fullscreen", fullscreen ? "false" : "true");
@@ -303,8 +303,10 @@ class PgApp : public rex::ReXApp {
   }
 
   void OnShutdown() override {
+    pg::StopMenuRequests();
     launcher_.reset();
-    menu_.reset();
+    CloseMenu();
+    drawer_ = nullptr;
     fps_overlay_.reset();
     rex::ui::UnregisterBind("bind_pg_menu");
     rex::ui::UnregisterBind("bind_pg_fullscreen");
@@ -328,8 +330,22 @@ class PgApp : public rex::ReXApp {
   bool launcher_shown_ = false;
   std::unique_ptr<pg::GameMenu> menu_;
   std::unique_ptr<pg::FpsOverlay> fps_overlay_;
+  rex::ui::ImGuiDrawer* drawer_ = nullptr;
 
-  void CloseMenu() { menu_.reset(); }
+  // Opens or closes the options menu (UI thread): Insert, the controller combo, Resume.
+  void SetMenuOpen(bool open) {
+    if (open && !menu_ && drawer_) {
+      menu_ = std::make_unique<pg::GameMenu>(drawer_, config_path_, [this] {
+        app_context().CallInUIThreadDeferred([this] { CloseMenu(); });
+      });
+    } else if (!open) {
+      menu_.reset();
+    }
+    // Also when nothing changed: the controller filter may have asked for a menu that could not
+    // open, and must not keep the controllers from the game.
+    pg::SetMenuInputOpen(menu_ != nullptr);
+  }
+  void CloseMenu() { SetMenuOpen(false); }
 
   // The game folder to start with: the saved or given one, or a "game" folder next to the
   // executable, which is found without asking.

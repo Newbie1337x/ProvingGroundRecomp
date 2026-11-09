@@ -108,7 +108,7 @@ class Launcher final : public rex::ui::ImGuiDialog {
   bool started_ = false;
 };
 
-// In-game options, toggled with Insert.
+// In-game options, toggled with Insert or View + Menu on a controller.
 class GameMenu final : public rex::ui::ImGuiDialog {
  public:
   GameMenu(rex::ui::ImGuiDrawer* drawer, std::filesystem::path config_path,
@@ -122,6 +122,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   std::filesystem::path config_path_;
   std::function<void()> on_close_;
   bool dirty_ = false;
+  bool focused_ = false;
 };
 
 // Small frame rate readout in the corner, shown with the show_fps setting.

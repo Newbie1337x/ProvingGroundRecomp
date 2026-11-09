@@ -73,6 +73,7 @@ set(PG_SOURCES
     src/pg_frame_pacing.cpp
     src/pg_input_script.cpp
     src/pg_launcher_win.cpp
+    src/pg_menu_input.cpp
     src/pg_sampler.cpp
     src/pg_timeline_hooks.cpp
     src/pg_ui.cpp

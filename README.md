@@ -18,11 +18,11 @@
 - **Runs natively.** The game's PowerPC code is translated ahead of time to C++ with the
   [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) and rendered through Vulkan. No
   emulator is involved at runtime.
-- **High frame rates.** 30 FPS (original), 60, 120, 144, 165, 240 or unlimited. Cutscenes,
+- **High frame rates.** 30 FPS (original), 40, 60, 90, 120, 144, 165, 240 or unlimited. Cutscenes,
   menus and gameplay keep their original speed at any frame rate.
 - **Higher resolutions.** Render at 1440p or 4K, with optional FXAA.
 - **Launcher and in-game menu.** Choose the game folder and the options before you play.
-  **Insert** opens the options while playing. Settings are saved.
+  **Insert**, or View + Menu on a controller, opens the options while playing. Settings are saved.
 - **Bring your own game.** No game data, assets or disc files are included; the game runs
   from your own extracted copy. The launcher checks that your `default.xex` is the version
   the build was made for.

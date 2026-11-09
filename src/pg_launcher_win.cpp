@@ -206,6 +206,9 @@ std::optional<std::filesystem::path> RunLauncherWindow(const std::filesystem::pa
   ImGuiIO& io = ImGui::GetIO();
   io.IniFilename = nullptr;
   io.LogFilename = nullptr;
+  // Handhelds such as the ROG Xbox Ally have no keyboard: the backend reads the first XInput
+  // controller, and this lets it move between the settings (A selects, B backs out of a list).
+  io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
   // Fonts and sizes follow the monitor's scale.
   const auto apply_scale = [&] {
     ui::SetScale(720.0f * float(GetDpiForWindow(w.hwnd)) / 96.0f);
@@ -222,11 +225,18 @@ std::optional<std::filesystem::path> RunLauncherWindow(const std::filesystem::pa
   UpdateWindow(w.hwnd);
 
   bool play = false;
+  // While nothing happens the window redraws about 30 times a second instead of at the screen's
+  // refresh rate (120 Hz on handhelds); the controller is still read on each of those frames.
+  DWORD last_activity = GetTickCount();
   while (!play && !w.closed) {
+    if (GetTickCount() - last_activity > 1000) {
+      MsgWaitForMultipleObjects(0, nullptr, FALSE, 33, QS_ALLINPUT);
+    }
     MSG msg;
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
       TranslateMessage(&msg);
       DispatchMessageW(&msg);
+      last_activity = GetTickCount();
     }
     if (w.closed) break;
     if (IsIconic(w.hwnd)) {
@@ -247,12 +257,20 @@ std::optional<std::filesystem::path> RunLauncherWindow(const std::filesystem::pa
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
     play = ui::DrawLauncher(state);
+    for (int key = ImGuiKey_GamepadStart; key <= ImGuiKey_GamepadRStickDown; ++key) {
+      if (ImGui::IsKeyDown(ImGuiKey(key))) {
+        last_activity = GetTickCount();
+        break;
+      }
+    }
     ImGui::Render();
     const float clear[4] = {0.141f, 0.141f, 0.141f, 1.0f};
     w.context->OMSetRenderTargets(1, &w.target, nullptr);
     w.context->ClearRenderTargetView(w.target, clear);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    w.swap_chain->Present(1, 0);
+    // An occluded window (covered, or the screen off) returns at once instead of waiting for
+    // the vblank, and the loop would spin a CPU core: wait as the minimized window does.
+    if (w.swap_chain->Present(1, 0) == DXGI_STATUS_OCCLUDED) Sleep(16);
   }
 
   ImGui_ImplDX11_Shutdown();

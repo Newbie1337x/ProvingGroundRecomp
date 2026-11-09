@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -36,7 +37,8 @@ REXCVAR_DEFINE_BOOL(uncapped_real_time, true, "GPU",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_INT32(frame_rate_limit, 60, "Video",
                      "Frame rate limit: 30 is the original vsync pacing, 0 is unlimited")
-    .allowed({"0", "30", "60", "120", "144", "165", "240"});
+    // 40 and 90 divide 120 Hz screens (handhelds such as the ROG Xbox Ally) evenly.
+    .allowed({"0", "30", "40", "60", "90", "120", "144", "165", "240"});
 REXCVAR_DEFINE_BOOL(swap_waits_for_new_frame, true, "Video",
                     "After a swap, the render thread waits for the game's next frame instead of "
                     "presenting the last one again")
@@ -65,11 +67,18 @@ float LoadGuestFloat(const uint8_t* base, uint32_t address) {
   return value;
 }
 
+// The GPU plugin's vsync setting. Uncapped() runs on every vblank (1000 times a second without
+// vsync) and in the swap, and a lookup by name takes the cvar registry's lock and parses a
+// string, so it is read once per swap and when the frame rate limit changes.
+std::atomic<bool> g_vsync{false};
+
+void RefreshVsync() { g_vsync.store(rex::cvar::Query<bool>("vsync"), std::memory_order_relaxed); }
+
 bool Uncapped() {
   if (!REXCVAR_GET(uncapped_real_time)) {
     return false;
   }
-  return !rex::cvar::Query<bool>("vsync");
+  return !g_vsync.load(std::memory_order_relaxed);
 }
 
 // Set while the swap runs on this thread; see sub_8234BE28.
@@ -135,26 +144,13 @@ void LimitFrameRate() {
   WaitUntil(next);
 }
 
-// Sleeps for about the given time (a high-resolution timer on Windows, where a plain sleep can
-// take a millisecond or more).
-void SleepBriefly(std::chrono::microseconds duration) {
-#if REX_PLATFORM_WIN32
-  static thread_local HANDLE timer = CreateWaitableTimerExW(
-      nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-  LARGE_INTEGER due;
-  due.QuadPart = -std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count() / 100;
-  if (timer && SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) {
-    WaitForSingleObject(timer, INFINITE);
-    return;
-  }
-#endif
-  std::this_thread::sleep_for(duration);
-}
-
 // Pacing trace: the render thread's swaps against the main loop's frames, to tell repeated
 // or skipped game frames and the engine time each presented frame advanced.
 std::atomic<bool> trace_active{false};
 std::atomic<uint64_t> main_loop_frames{0};
+// Wakes the render thread waiting in WaitForNewMainLoopFrame when the main loop hands over a frame.
+std::mutex main_loop_mutex;
+std::condition_variable main_loop_frame_ready;
 // Sum of the engine's frame time over the main loop's frames (seconds), written by the main loop.
 std::atomic<double> main_loop_engine_time{0.0};
 std::FILE* trace_file = nullptr;
@@ -176,10 +172,13 @@ void WaitForNewMainLoopFrame() {
       Clock::now() - last_new_frame < std::chrono::milliseconds(250)) {
     const auto deadline = last_new_frame + std::chrono::duration_cast<Clock::duration>(
                                                std::chrono::duration<double>(2.0 * frame_interval_s));
-    while ((count = main_loop_frames.load(std::memory_order_acquire)) == last_count &&
-           Clock::now() < deadline) {
-      SleepBriefly(std::chrono::microseconds(100));
-    }
+    // Woken by the hand-over rather than polling (it checked every 100 us, which kept a CPU core
+    // from idling: battery on handhelds).
+    std::unique_lock lock(main_loop_mutex);
+    main_loop_frame_ready.wait_until(lock, deadline, [&] {
+      return main_loop_frames.load(std::memory_order_acquire) != last_count;
+    });
+    count = main_loop_frames.load(std::memory_order_acquire);
   }
   if (count != last_count) {
     const auto now = Clock::now();
@@ -235,6 +234,7 @@ void ApplyFrameRateLimit() {
   if (rex::cvar::Query<bool>("vsync") != vsync) {
     rex::cvar::SetFlagByName("vsync", vsync ? "true" : "false");
   }
+  RefreshVsync();
 }
 
 }  // namespace pg
@@ -252,6 +252,7 @@ extern "C" void __imp__sub_824853A8(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void sub_824853A8(PPCContext& __restrict ctx, uint8_t* base) {
   auto* swap_interval = reinterpret_cast<uint32_t*>(base + kSwapIntervalAddress);
   static const uint32_t original_swap_interval = *swap_interval;
+  RefreshVsync();
   *swap_interval = Uncapped() ? 0 : original_swap_interval;
   rex::perf::TimelineScope scope(rex::perf::TimelineEvent::kGuest1);
   const auto swap_start = Clock::now();
@@ -357,6 +358,11 @@ extern "C" void sub_824852F8(PPCContext& __restrict ctx, uint8_t* base) {
     main_loop_engine_time.store(main_loop_engine_time.load(std::memory_order_relaxed) +
                                     LoadGuestFloat(base, kFrameDeltaAddress),
                                 std::memory_order_relaxed);
-    main_loop_frames.fetch_add(1, std::memory_order_release);
+    {
+      // Under the lock, so a waiter between its check and its sleep cannot miss the wake-up.
+      std::lock_guard lock(main_loop_mutex);
+      main_loop_frames.fetch_add(1, std::memory_order_release);
+    }
+    main_loop_frame_ready.notify_one();
   }
 }
