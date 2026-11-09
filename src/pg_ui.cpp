@@ -227,6 +227,10 @@ std::string TomlString(const std::string& value) {
   }
   std::string out = "\"";
   for (char c : value) {
+    if (c == '\n') {
+      out += "\\n";
+      continue;
+    }
     if (c == '\\' || c == '"') out += '\\';
     out += c;
   }
@@ -839,8 +843,9 @@ const std::vector<Choice>& ResolutionChoices() {
   return choices;
 }
 const std::vector<Choice> kFrameRates = {
-    {"30", "30 FPS (original)"}, {"60", "60 FPS"},   {"120", "120 FPS"}, {"144", "144 FPS"},
-    {"165", "165 FPS"},          {"240", "240 FPS"}, {"0", "Unlimited"},
+    {"30", "30 FPS (original)"}, {"40", "40 FPS"},   {"60", "60 FPS"},   {"90", "90 FPS"},
+    {"120", "120 FPS"},          {"144", "144 FPS"}, {"165", "165 FPS"}, {"240", "240 FPS"},
+    {"0", "Unlimited"},
 };
 const std::vector<Choice> kAntiAliasing = {
     {"none", "Off"},
@@ -1538,7 +1543,8 @@ bool DrawLauncher(LauncherState& state) {
     ImGui::SetTooltip("Choose the game folder first.");
   }
   if (can_play && !io.WantTextInput && state.capturing.empty() &&
-      ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
+      (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+       ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false))) {
     play_pressed = true;
   }
 

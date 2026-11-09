@@ -36,7 +36,8 @@ REXCVAR_DEFINE_BOOL(uncapped_real_time, true, "GPU",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_INT32(frame_rate_limit, 60, "Video",
                      "Frame rate limit: 30 is the original vsync pacing, 0 is unlimited")
-    .allowed({"0", "30", "60", "120", "144", "165", "240"});
+    // 40 and 90 divide 120 Hz screens (handhelds such as the ROG Xbox Ally) evenly.
+    .allowed({"0", "30", "40", "60", "90", "120", "144", "165", "240"});
 REXCVAR_DEFINE_BOOL(swap_waits_for_new_frame, true, "Video",
                     "After a swap, the render thread waits for the game's next frame instead of "
                     "presenting the last one again")

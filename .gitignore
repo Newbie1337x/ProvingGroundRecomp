@@ -14,3 +14,7 @@
 /assets/**
 !/assets/README.txt
 /generated/
+
+# Python bytecode
+__pycache__/
+*.pyc

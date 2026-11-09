@@ -206,6 +206,9 @@ std::optional<std::filesystem::path> RunLauncherWindow(const std::filesystem::pa
   ImGuiIO& io = ImGui::GetIO();
   io.IniFilename = nullptr;
   io.LogFilename = nullptr;
+  // Handhelds such as the ROG Xbox Ally have no keyboard: the backend reads the first XInput
+  // controller, and this lets it move between the settings (A selects, B backs out of a list).
+  io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
   // Fonts and sizes follow the monitor's scale.
   const auto apply_scale = [&] {
     ui::SetScale(720.0f * float(GetDpiForWindow(w.hwnd)) / 96.0f);
@@ -252,7 +255,9 @@ std::optional<std::filesystem::path> RunLauncherWindow(const std::filesystem::pa
     w.context->OMSetRenderTargets(1, &w.target, nullptr);
     w.context->ClearRenderTargetView(w.target, clear);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    w.swap_chain->Present(1, 0);
+    // An occluded window (covered, or the screen off) returns at once instead of waiting for
+    // the vblank, and the loop would spin a CPU core: wait as the minimized window does.
+    if (w.swap_chain->Present(1, 0) == DXGI_STATUS_OCCLUDED) Sleep(16);
   }
 
   ImGui_ImplDX11_Shutdown();

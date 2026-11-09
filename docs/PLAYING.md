@@ -27,6 +27,24 @@ Deck:
 2. Start `./ProvingGround` once in desktop mode, check the options and press **Play**.
 3. In Steam, **Add a Non-Steam Game** and pick `ProvingGround` to play it in game mode.
 
+### Windows handhelds (ROG Xbox Ally and similar)
+
+Not tested on a handheld yet. What to expect on a ROG Xbox Ally / Ally X:
+
+- Put the extracted game in a folder named `game` next to `ProvingGround.exe`, so the launcher
+  finds it without the folder dialog or typing a path.
+- The launcher can be used with the built-in controller (D-pad or stick to move, A to change a
+  setting, B to close a list, Start to play) or with the touch screen.
+- **The in-game options menu opens with the Insert key only.** Choose your settings in the
+  launcher, or open the Windows On-Screen Keyboard (`osk.exe`, which has an Ins key) if you
+  need the menu while playing.
+- Suggested settings for the 1080p 120 Hz screen: Resolution 1920 x 1080 or 1280 x 720, Effects
+  and HUD 1x, Sharpness about 50%, and a frame rate of 40 or 60 FPS (both divide 120 Hz evenly).
+  Effects and HUD on Automatic picks 2x at 1080p, which renders them at 1440p and costs GPU time
+  the small screen can't show.
+- FSR 3/4 are turned off in this version (see below), so nothing here depends on FSR 4, which
+  needs a Radeon RX 9000 GPU.
+
 ## Options
 
 | Option | |
