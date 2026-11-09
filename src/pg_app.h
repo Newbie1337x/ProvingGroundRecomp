@@ -69,13 +69,15 @@ class PgApp : public rex::ReXApp {
     // The launcher has a window of its own, shown before the renderer is chosen and the game's
     // window opens.
     if (LauncherWanted(pg::CheckGameFolder(StartupFolder({})))) {
-      if (!pg::RunLauncherWindow(config_path_, StartupFolder({}))) {
+      bool window_opened = true;
+      if (!pg::RunLauncherWindow(config_path_, StartupFolder({}), &window_opened)) {
         REXLOG_INFO("Launcher closed");
         std::exit(0);
       }
       // Again, for the GPU plugin's settings the launcher changed; the plugin reads them below.
       rex::cvar::LoadConfig(config_path_);
-      launcher_shown_ = true;
+      // When the window could not open, the in-game launcher shows instead.
+      launcher_shown_ = window_opened;
     }
 #endif
 

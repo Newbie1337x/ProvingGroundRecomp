@@ -82,10 +82,11 @@ void ConfigureLauncherStyle(ImGuiStyle& style);
 bool DrawLauncher(LauncherState& state);
 }  // namespace ui
 // Shows the launcher window until Play (returns the game folder) or until it is closed
-// (nullopt), and saves the settings. If the window cannot open, returns the given folder. Windows
-// only.
+// (nullopt), and saves the settings. If the window cannot open, returns the given folder and sets
+// *window_opened (when given) to false. Windows only.
 std::optional<std::filesystem::path> RunLauncherWindow(const std::filesystem::path& config_path,
-                                                       const std::filesystem::path& folder);
+                                                       const std::filesystem::path& folder,
+                                                       bool* window_opened = nullptr);
 
 // Start screen: game folder and the main options, then Play.
 class Launcher final : public rex::ui::ImGuiDialog {

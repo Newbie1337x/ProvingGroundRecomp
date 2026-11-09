@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
@@ -40,8 +41,8 @@ REXCVAR_DEFINE_STRING(render_resolution, "720p", "Video",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_STRING(effects_resolution, "auto", "Video",
                       "Scale of the effects (bloom, blur, final image) and the HUD, in multiples "
-                      "of 720p: 1, 2, 3, or auto (the nearest one to render_resolution). Takes "
-                      "effect after a restart. Overridden by resolution_scale when that is set.")
+                      "of 720p: 1, 2, 3, or auto (the smallest one that holds render_resolution). "
+                      "Takes effect after a restart. Overridden by resolution_scale when that is set.")
     .allowed({"auto", "1", "2", "3"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(language, "auto", "General",
@@ -175,11 +176,13 @@ double RenderResolutionFactor() {
 }
 
 // The SDK's whole-number EDRAM scale (resolution_scale) for the effects and the HUD: the setting,
-// or the nearest one to the 3D resolution.
+// or the smallest one that holds the 3D resolution. Rounding to the nearest one put a 3D scene
+// between 720p and 1080p (900p, 768p...) into a 720p final image, which was then stretched to the
+// screen and looked blurry (#2).
 int32_t RenderResolutionScale() {
   const std::string effects = REXCVAR_GET(effects_resolution);
   if (effects == "1" || effects == "2" || effects == "3") return effects[0] - '0';
-  return std::clamp(int32_t(std::lround(RenderResolutionFactor())), 1, 3);
+  return std::clamp(int32_t(std::ceil(RenderResolutionFactor() - 0.01)), 1, 3);
 }
 
 // Whether this file sets native_main_pass_scale_sixteenths from render_resolution (false when it
@@ -321,9 +324,10 @@ bool HasXex(const std::filesystem::path& folder) {
 // The child with the name in any case, as the game looks its files up.
 std::filesystem::path FindChild(const std::filesystem::path& folder, std::string_view name) {
   std::error_code ec;
-  for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
-    if (rex::string::utf8_equal_case(rex::path_to_utf8(entry.path().filename()), name)) {
-      return entry.path();
+  for (std::filesystem::directory_iterator it(folder, ec), end; !ec && it != end;
+       it.increment(ec)) {
+    if (rex::string::utf8_equal_case(rex::path_to_utf8(it->path().filename()), name)) {
+      return it->path();
     }
   }
   return {};
@@ -345,6 +349,8 @@ bool HasGameData(const std::filesystem::path& folder) {
 void SaveSettings(const std::filesystem::path& config_path) {
   // Keep any other lines the user added, replacing only the settings written here.
   std::vector<std::string> kept;
+  // The lines of settings written here, for those given only on the command line.
+  std::map<std::string, std::string> old_lines;
   {
     std::ifstream in(config_path);
     std::string line;
@@ -358,6 +364,7 @@ void SaveSettings(const std::filesystem::path& config_path) {
                             kSavedSettings.end() &&
                             (rex::cvar::GetFlagInfo(key) || g_staged.contains(key)) ||
                         (IsKeyboardSetting(key) && rex::cvar::GetFlagInfo(key));
+      if (ours) old_lines[key] = line;
       if (!ours && line.rfind("# Proving Ground settings", 0) != 0) kept.push_back(line);
     }
   }
@@ -375,12 +382,26 @@ void SaveSettings(const std::filesystem::path& config_path) {
       }
       continue;
     }
+    if (info->source == rex::cvar::Source::kCommandLine) {
+      // Not the user's choice: keep what the file had.
+      if (const auto old = old_lines.find(name); old != old_lines.end()) {
+        out << old->second << "\n";
+      }
+      continue;
+    }
     const std::string value = rex::cvar::GetFlagByName(name);
     out << name << " = "
         << (info->type == rex::cvar::FlagType::String ? TomlString(value) : value) << "\n";
   }
   for (const auto& entry : rex::cvar::GetRegistry()) {
     if (!IsKeyboardSetting(entry.name)) continue;
+    const auto* info = rex::cvar::GetFlagInfo(entry.name);
+    if (info && info->source == rex::cvar::Source::kCommandLine) {
+      if (const auto old = old_lines.find(entry.name); old != old_lines.end()) {
+        out << old->second << "\n";
+      }
+      continue;
+    }
     const std::string value = entry.getter();
     if (value == entry.default_value) continue;
     out << entry.name << " = "
@@ -440,7 +461,9 @@ void ApplyUpscaler() {
   // runtime offers it. The cvars cover a presenter created later; the paint config changes the
   // running one.
   const bool fsr3 = FsrEnabled();
-  const bool fsr1 = !fsr3 && SharpeningEnabled();
+  // FSR 1 also when the game's final image is smaller than the screen, even with sharpening off:
+  // its upscale (EASU) keeps edges that the bilinear stretch blurs (#2).
+  const bool fsr1 = !fsr3 && (SharpeningEnabled() || (SharpeningAvailable() && FsrUseful()));
   const double cas_sharpness = REXCVAR_GET(sharpness) / 100.0;
   rex::cvar::SetFlagByName("present_effect", fsr3 ? "fsr3" : fsr1 ? "fsr" : "bilinear");
   if (fsr3) rex::cvar::SetFlagByName("present_fsr_quality_mode", "nativeaa");
@@ -465,21 +488,42 @@ void ApplyUpscaler() {
 
 const char* RequiredRenderer() { return REXCVAR_GET(renderer) == "d3d12" ? "d3d12" : "vulkan"; }
 
+#if REX_PLATFORM_WIN32
+// One argument as CommandLineToArgvW reads it back: quoted, with the backslashes before a quote
+// doubled and embedded quotes escaped.
+static std::wstring QuoteArg(const std::wstring& arg) {
+  std::wstring result = L"\"";
+  size_t backslashes = 0;
+  for (const wchar_t c : arg) {
+    if (c == L'\\') {
+      ++backslashes;
+      continue;
+    }
+    result.append(c == L'"' ? backslashes * 2 + 1 : backslashes, L'\\');
+    backslashes = 0;
+    result += c;
+  }
+  result.append(backslashes * 2, L'\\');
+  result += L'"';
+  return result;
+}
+#endif
+
 bool Relaunch(const std::filesystem::path& game_folder) {
 #if REX_PLATFORM_WIN32
   // The same command line, with the game folder so the new process skips the launcher.
   const std::filesystem::path exe = rex::filesystem::GetExecutablePath();
-  std::wstring command = L"\"" + exe.wstring() + L"\"";
+  std::wstring command = QuoteArg(exe.wstring());
   int argc = 0;
   if (wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
     for (int i = 1; i < argc; ++i) {
       const std::wstring arg = argv[i];
       if (arg.starts_with(L"--launcher") || arg.starts_with(L"--game_data_root")) continue;
-      command += L" \"" + arg + L"\"";
+      command += L" " + QuoteArg(arg);
     }
     LocalFree(argv);
   }
-  command += L" \"--game_data_root=" + game_folder.wstring() + L"\"";
+  command += L" " + QuoteArg(L"--game_data_root=" + game_folder.wstring());
   STARTUPINFOW startup = {};
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process = {};
@@ -508,9 +552,10 @@ GameFolderCheck CheckGameFolder(const std::filesystem::path& chosen) {
     folder = chosen;
   } else {
     // Accept the folder that contains the extracted game, one level up.
-    for (const auto& entry : std::filesystem::directory_iterator(chosen, ec)) {
-      if (entry.is_directory(ec) && HasXex(entry.path())) {
-        folder = entry.path();
+    for (std::filesystem::directory_iterator it(chosen, ec), end; !ec && it != end;
+         it.increment(ec)) {
+      if (it->is_directory(ec) && HasXex(it->path())) {
+        folder = it->path();
         break;
       }
     }
@@ -854,8 +899,8 @@ constexpr const char* kResolutionHelp =
     "screens it fits inside the chosen size. In game, changes apply at once (Vulkan).";
 constexpr const char* kEffectsResolutionHelp =
     "What the effects (bloom, blur, the final image) and the HUD render at: 1x is 720p, 2x "
-    "1440p, 3x 4K. Automatic picks the nearest one to the resolution. Lower is faster; higher "
-    "makes the HUD and effects sharper. Takes effect after a restart.";
+    "1440p, 3x 4K. Automatic picks the smallest one that holds the resolution. Lower is faster; "
+    "higher makes the HUD and effects sharper. Takes effect after a restart.";
 
 // Resolution row (the 3D scene). A setting saved with an older name (1080p...) is shown and
 // kept as WIDTHxHEIGHT.
@@ -1575,9 +1620,21 @@ void StageSettings(const std::filesystem::path& config_path) {
                      [&](const char* name) { return key == name; }) == kSavedSettings.end()) {
       continue;
     }
-    std::string value = line.substr(line.find_first_not_of(' ', eq + 1));
-    if (value.size() >= 2 && (value.front() == '\'' || value.front() == '"')) {
-      value = value.substr(1, value.size() - 2);
+    const auto value_start = line.find_first_not_of(" \t", eq + 1);
+    if (value_start == std::string::npos) continue;
+    std::string value = line.substr(value_start);
+    if (value.front() == '\'' || value.front() == '"') {
+      // Up to the matching quote; anything after it (a comment) is dropped.
+      const auto close = value.find(value.front(), 1);
+      if (close == std::string::npos) continue;
+      value = value.substr(1, close - 1);
+    } else {
+      if (const auto comment = value.find(" #"); comment != std::string::npos) {
+        value.erase(comment);
+      }
+      const auto last = value.find_last_not_of(" \t\r");
+      if (last == std::string::npos) continue;
+      value.erase(last + 1);
     }
     g_staged[key] = value;
   }

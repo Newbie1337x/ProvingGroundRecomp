@@ -140,7 +140,9 @@ void Destroy(LauncherWindow& w, const wchar_t* class_name, HINSTANCE instance) {
 #endif
 
 std::optional<std::filesystem::path> RunLauncherWindow(const std::filesystem::path& config_path,
-                                                       const std::filesystem::path& folder) {
+                                                       const std::filesystem::path& folder,
+                                                       bool* window_opened) {
+  if (window_opened) *window_opened = false;
 #if REX_PLATFORM_WIN32
   ImGui_ImplWin32_EnableDpiAwareness();
   const HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -192,6 +194,7 @@ std::optional<std::filesystem::path> RunLauncherWindow(const std::filesystem::pa
     Destroy(w, class_name, instance);
     return folder;
   }
+  if (window_opened) *window_opened = true;
   CreateTarget(w);
 
   StageSettings(config_path);
@@ -235,13 +238,22 @@ std::optional<std::filesystem::path> RunLauncherWindow(const std::filesystem::pa
     }
     if (w.resize_width && w.resize_height) {
       ReleaseTarget(w);
-      w.swap_chain->ResizeBuffers(0, w.resize_width, w.resize_height, DXGI_FORMAT_UNKNOWN, 0);
+      const HRESULT resized =
+          w.swap_chain->ResizeBuffers(0, w.resize_width, w.resize_height, DXGI_FORMAT_UNKNOWN, 0);
       w.resize_width = w.resize_height = 0;
-      CreateTarget(w);
+      if (SUCCEEDED(resized)) {
+        CreateTarget(w);
+      } else {
+        REXLOG_WARN("Could not resize the launcher window ({:08X})", uint32_t(resized));
+      }
     }
     if (w.dpi_changed) {
       w.dpi_changed = false;
       apply_scale();
+    }
+    if (!w.target) {
+      Sleep(16);
+      continue;
     }
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
@@ -252,7 +264,7 @@ std::optional<std::filesystem::path> RunLauncherWindow(const std::filesystem::pa
     w.context->OMSetRenderTargets(1, &w.target, nullptr);
     w.context->ClearRenderTargetView(w.target, clear);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    w.swap_chain->Present(1, 0);
+    if (w.swap_chain->Present(1, 0) == DXGI_STATUS_OCCLUDED) Sleep(10);
   }
 
   ImGui_ImplDX11_Shutdown();

@@ -23,12 +23,17 @@ void OnSwap(uint8_t* base) {
   if (path.empty() || frame != uint32_t(REXCVAR_GET(dump_memory_frame))) return;
   unsigned long long start = 0, size = 0;
   if (std::sscanf(REXCVAR_GET(dump_memory_range).c_str(), "%llx+%llx", &start, &size) != 2 ||
-      start + size > 0x100000000ull) {
+      start > 0xFFFFFFFFull || size > 0x100000000ull - start) {
     REXLOG_WARN("dump_memory_range must be start+size in hex");
     return;
   }
   std::ofstream out(path, std::ios::binary);
   out.write(reinterpret_cast<const char*>(base + start), std::streamsize(size));
+  out.flush();
+  if (!out) {
+    REXLOG_WARN("Could not write the memory dump to {}", path);
+    return;
+  }
   REXLOG_INFO("Dumped guest 0x{:08X}+0x{:X} to {} at frame {}", start, size, path, frame);
 }
 
