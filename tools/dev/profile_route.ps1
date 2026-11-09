@@ -98,7 +98,9 @@ if (-not $NoTracy) {
         -ArgumentList @('-a', '127.0.0.1', '-o', "$out\trace.tracy", '-f') `
         -RedirectStandardOutput "$out\capture.txt"
 }
-$game = Start-Process -FilePath $exe -ArgumentList $gameArgs -WorkingDirectory $repo -PassThru
+# Quote each argument, as route.ps1 does, so paths with spaces reach the game intact.
+$quotedArgs = $gameArgs | ForEach-Object { '"' + $_ + '"' }
+$game = Start-Process -FilePath $exe -ArgumentList $quotedArgs -WorkingDirectory $repo -PassThru
 if (-not $game.WaitForExit($TimeoutSeconds * 1000)) {
     Stop-Process -Id $game.Id -Force
     Write-Warning "The game did not reach measure_stop within $TimeoutSeconds s and was closed."
@@ -108,9 +110,11 @@ if ($capture -and -not $capture.WaitForExit(120000)) { Stop-Process -Id $capture
 $report = Join-Path $out 'report.txt'
 Get-Content -LiteralPath "$out\settings.txt" | Tee-Object -FilePath $report
 & python (Join-Path $PSScriptRoot 'summarize_fps.py') "$out\frames.csv" | Tee-Object -FilePath $report -Append
+if ($LASTEXITCODE) { throw 'summarize_fps.py failed; see the output above.' }
 # One line per run in out\traces\runs.tsv: search it before measuring a configuration again.
 $fps = (Select-String -LiteralPath $report -Pattern 'Effective mean FPS: *([0-9.]+)').Matches |
     Select-Object -First 1 | ForEach-Object { $_.Groups[1].Value }
+if (-not $fps) { throw "No 'Effective mean FPS' line in $report; the run is not recorded in runs.tsv." }
 $heavy = (Select-String -LiteralPath $report -Pattern '1500\+ draws:.*\(max +([0-9]+) fps\)').Matches |
     Select-Object -First 1 | ForEach-Object { $_.Groups[1].Value }
 $index = Join-Path $repo 'out\traces\runs.tsv'
@@ -122,6 +126,7 @@ if (-not (Test-Path -LiteralPath $index)) {
 if (-not $NoTracy) {
     & python (Join-Path $PSScriptRoot 'analyze_trace.py') "$out\trace.tracy" --sdk-src $sdkSource |
         Tee-Object -FilePath $report -Append
+    if ($LASTEXITCODE) { throw 'analyze_trace.py failed; see the output above.' }
 }
 if ($Sample) { Write-Host "Samples: $out\samples.txt" }
 Write-Host "Report: $report"
