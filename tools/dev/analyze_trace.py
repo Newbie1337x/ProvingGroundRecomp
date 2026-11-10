@@ -104,6 +104,10 @@ def main():
             per_frame[index]["draws"] += 1
 
     blocked = defaultdict(float)
+    # Threads that never block still count as busy, so they must appear in the list.
+    for thread in {event[3] for event in events}:
+        if thread != gpu_thread:
+            blocked.setdefault(thread, 0.0)
     # Critical sections are left out: millions of events, and contention is rare.
     for pattern in ("WaitFor", "Delay", "Yield"):
         for row in export(args.csvexport, args.trace, "-u", "-f", pattern):

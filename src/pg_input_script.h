@@ -90,6 +90,8 @@ class PgInputScript final : public rex::input::InputDriver {
   std::mutex mutex_;
   bool started_ = false;
   uint32_t start_ms_ = 0;
+  // The engine's time when the script clock started, for input_replay_rewrite.
+  uint32_t rewrite_start_ms_ = 0;
 
   // Recording
   std::FILE* file_ = nullptr;

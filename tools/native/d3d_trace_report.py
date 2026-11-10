@@ -35,8 +35,12 @@ def main():
     top = 40
     if '--top' in args:
         i = args.index('--top')
+        if i + 1 >= len(args) or not args[i + 1].isdigit():
+            sys.exit('--top needs a whole number\n' + __doc__)
         top = int(args[i + 1])
         del args[i:i + 2]
+    if not args:
+        sys.exit(__doc__)
     names = {}
     names_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'd3d_names.txt')
     for line in open(names_path, encoding='utf-8'):

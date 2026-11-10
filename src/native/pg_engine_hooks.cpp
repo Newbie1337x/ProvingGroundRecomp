@@ -218,6 +218,11 @@ void UpdateDump() {
       std::fprintf(g_dump_index, "# pg engine mesh dump, frame %llu\n",
                    static_cast<unsigned long long>(frame));
       g_dumping = true;
+    } else {
+      REXLOG_WARN("Could not open both engine mesh dump files for {}", path);
+      if (g_dump_index) std::fclose(g_dump_index);
+      if (g_dump_data) std::fclose(g_dump_data);
+      g_dump_index = g_dump_data = nullptr;
     }
   } else if (swaps == frame + 1 && g_dumping.exchange(false)) {
     std::fclose(g_dump_index);
@@ -376,10 +381,12 @@ void RegisterStaticBuffers(const uint8_t* base, const pg::native::EngineMesh& me
         mesh.vertex_buffer, false);
   }
   if (mesh.index_buffer) {
-    // Words 24/28: data address and size in bytes.
-    RegisterStaticRange(pg::native::LoadBigU32(base, mesh.index_buffer + 24),
-                        pg::native::LoadBigU32(base, mesh.index_buffer + 28), mesh.index_buffer,
-                        true);
+    // Words 24/28: data address and size in bytes; an implausible size is not registered.
+    const uint32_t index_size = pg::native::LoadBigU32(base, mesh.index_buffer + 28);
+    if (index_size <= kMaxBlobBytes) {
+      RegisterStaticRange(pg::native::LoadBigU32(base, mesh.index_buffer + 24), index_size,
+                          mesh.index_buffer, true);
+    }
   }
 }
 

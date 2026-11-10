@@ -115,7 +115,8 @@ def main():
         mesh_vertices = []
         for v in range(count):
             p = struct.unpack_from(fmt, vdata, v * stride + pos[0][1])
-            mesh_vertices.append(tuple(p[:3]) if len(p) >= 3 else (p[0], p[1], 0.0))
+            p = tuple(p[:3])
+            mesh_vertices.append(p + (0.0,) * (3 - len(p)))
         good = [p for p in mesh_vertices if all(math.isfinite(k) and abs(k) < 1e5 for k in p)]
         if len(good) < len(mesh_vertices) or not good:
             # Skinned meshes (the characters) keep their vertices in another space.
@@ -149,10 +150,15 @@ def main():
     # Top-down picture (x right, z down), lowest triangles first, flat-shaded.
     from PIL import Image, ImageDraw
     finite = [v for v in vertices if all(math.isfinite(c) and abs(c) < 1e5 for c in v)]
+    if not finite:
+        print('no finite vertices, no top-down picture written')
+        return
     xs = sorted(v[0] for v in finite)
     zs = sorted(v[2] for v in finite)
-    lo_x, hi_x = xs[len(xs) // 100], xs[-len(xs) // 100 - 1]
-    lo_z, hi_z = zs[len(zs) // 100], zs[-len(zs) // 100 - 1]
+    n = len(finite)
+    lo, hi = n // 100, n - 1 - n // 100
+    lo_x, hi_x = xs[lo], xs[hi]
+    lo_z, hi_z = zs[lo], zs[hi]
     size = 1600
     scale = size / max(hi_x - lo_x, hi_z - lo_z, 1e-3)
     img = Image.new('RGB', (size, size), (20, 20, 30))

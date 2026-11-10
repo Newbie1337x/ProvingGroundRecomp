@@ -55,10 +55,10 @@ Not tested on a handheld yet. What to expect on a ROG Xbox Ally / Ally X:
 | Frame rate | 30 FPS keeps the original console pacing. 60 and above run the game faster than the console could; cutscenes still play at their original speed. |
 | Renderer | Vulkan (main, fastest) or Direct3D 12 (Windows). Changing it in the Insert menu applies on the next start. |
 | Resolution | What the 3D scene renders at: your screen's resolutions are listed, 1280 x 720 is the original. The game's image is 16:9 and fits inside the chosen size. With Vulkan it changes at once in the Insert menu; with Direct3D 12 it follows Effects and HUD. |
-| Effects and HUD | What the effects (bloom, blur, the final image) and the HUD render at: 1x (720p), 2x (1440p), 3x (4K), or Automatic, the nearest one to the resolution. Lower is faster. Applies on the next start. |
+| Effects and HUD | What the effects (bloom, blur, the final image) and the HUD render at: 1x (720p), 2x (1440p), 3x (4K), or Automatic, the smallest one that holds the resolution (so it never throws away detail). Lower is faster. Applies on the next start. |
 | Texture filtering | Anisotropic filtering, Off to 16x (4x by default): keeps the ground and ramps sharp into the distance. |
 | Anti-aliasing | Off or FXAA. |
-| Sharpness | AMD FSR 1 sharpening of the final image, Off by default. When the game's image is smaller than the window (Effects and HUD below your screen), FSR 1 also upscales it. Applies at once. |
+| Sharpness | AMD FSR 1 sharpening of the final image, Off by default. When the game's image is smaller than the window (Effects and HUD below your screen), FSR 1 upscales it, also with sharpening Off (builds with FidelityFX). Applies at once. |
 | Button icons | Automatic, Xbox or PlayStation. See Controls. |
 | Show FPS counter | A small counter in the top-right corner. |
 

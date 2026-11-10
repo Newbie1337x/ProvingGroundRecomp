@@ -34,6 +34,7 @@ SYMBOLS = {'triangle': (64, 226, 160), 'square': (232, 140, 214),
            'circle': (255, 102, 102), 'cross': (124, 178, 232)}
 
 
+# load_default(size) needs Pillow >= 10.1.
 def font(px):
     return ImageFont.load_default(px * SS)
 
@@ -161,6 +162,8 @@ def draw():
 
 
 def main():
+    if '--preview' in sys.argv and sys.argv.index('--preview') + 1 >= len(sys.argv):
+        sys.exit('--preview needs an output path\n' + __doc__)
     atlas = draw()
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     png = io.BytesIO()

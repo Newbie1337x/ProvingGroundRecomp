@@ -156,10 +156,20 @@ bool PgInputScript::LoadLocked(const std::string& path) {
   clock_ = Clock::kGuest;
   while (std::fgets(line, sizeof(line), file)) {
     ++line_number;
+    if (!std::strchr(line, '\n') && !std::feof(file)) {
+      REXLOG_ERROR("Input script: {}:{}: line too long", path, line_number);
+      ok = false;
+      break;
+    }
     char* text = line + std::strspn(line, " \t");
     text[std::strcspn(text, "\r\n")] = '\0';
     if (line_number == 1 && !std::strncmp(text, "# pg-input v2", 13)) clock_ = Clock::kEngine;
     if (!*text || *text == '#') continue;
+    if (*text == '-') {
+      REXLOG_ERROR("Input script: {}:{}: time must not be negative", path, line_number);
+      ok = false;
+      break;
+    }
     Event event;
     char kind[32] = {};
     int consumed = 0;
@@ -175,7 +185,9 @@ bool PgInputScript::LoadLocked(const std::string& path) {
       unsigned buttons, lt, rt;
       int lx, ly, rx, ry;
       if (std::sscanf(rest, "%x %u %u %d %d %d %d", &buttons, &lt, &rt, &lx, &ly, &rx, &ry) != 7 ||
-          buttons > 0xFFFF || lt > 255 || rt > 255) {
+          buttons > 0xFFFF || lt > 255 || rt > 255 || lx < INT16_MIN || lx > INT16_MAX ||
+          ly < INT16_MIN || ly > INT16_MAX || rx < INT16_MIN || rx > INT16_MAX ||
+          ry < INT16_MIN || ry > INT16_MAX) {
         REXLOG_ERROR("Input script: {}:{}: bad pad values", path, line_number);
         ok = false;
         break;
@@ -224,6 +236,7 @@ uint32_t PgInputScript::NowLocked() {
   if (!started_) {
     started_ = true;
     start_ms_ = uptime;
+    rewrite_start_ms_ = pg::EngineTimeMillis();
   }
   return uptime - start_ms_;
 }
@@ -291,8 +304,7 @@ void PgInputScript::FireLocked(const Event& event) {
   if (rewrite_) {
     // The engine's time when the event fires (this replay may run on the guest clock).
     const uint32_t engine_ms = pg::EngineTimeMillis();
-    static const uint32_t engine_start = engine_ms;
-    std::fprintf(rewrite_, "%u %s\n", engine_ms - engine_start, event.line.c_str());
+    std::fprintf(rewrite_, "%u %s\n", engine_ms - rewrite_start_ms_, event.line.c_str());
     std::fflush(rewrite_);
   }
   switch (event.kind) {

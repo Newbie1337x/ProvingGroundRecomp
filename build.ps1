@@ -83,8 +83,14 @@ if ($SdkSource) {
         if (-not $git) { throw 'Git is required to fetch the ReXGlue SDK.' }
         Invoke-Step 'sdk-clone' $git @('-c', 'core.symlinks=false', '-c', 'core.longpaths=true', 'clone', '--branch', $sdkTag,
             '--depth', '1', $sdkUrl, $sdk)
+    }
+    # Submodules are fetched on the first run and again whenever the marker is missing.
+    $submodulesMarker = Join-Path $sdk '.pg-submodules-ok'
+    if (-not (Test-Path -LiteralPath $submodulesMarker)) {
+        if (-not $git) { throw 'Git is required to fetch the ReXGlue SDK.' }
         Invoke-Step 'sdk-submodules' $git @('-c', 'core.symlinks=false', '-c', 'core.longpaths=true', 'submodule', 'update',
             '--init', '--recursive', '--depth', '1', '--jobs', '8') $sdk
+        Set-Content -LiteralPath $submodulesMarker -Value 'ok' -Encoding ascii
     }
     if (-not (Test-Path -LiteralPath $marker)) {
         Invoke-Step 'sdk-patch' $git @('apply', '--whitespace=nowarn', $patch) $sdk

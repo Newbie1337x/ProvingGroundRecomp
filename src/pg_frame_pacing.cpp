@@ -192,7 +192,7 @@ void WaitForNewMainLoopFrame() {
 
 void TraceSwap(const uint8_t* base, Clock::time_point swap_start, Clock::time_point swap_end,
                Clock::time_point limit_end) {
-  if (!trace_file || !trace_active.load(std::memory_order_relaxed)) return;
+  if (!trace_active.load(std::memory_order_acquire) || !trace_file) return;
   static const Clock::time_point origin = swap_start;
   auto us = [](Clock::duration d) {
     return (long long)std::chrono::duration_cast<std::chrono::microseconds>(d).count();
@@ -223,7 +223,7 @@ void SetPacingTraceActive(bool active) {
                  trace_file);
     }
   });
-  trace_active.store(active, std::memory_order_relaxed);
+  trace_active.store(active, std::memory_order_release);
   if (!active && trace_file) std::fflush(trace_file);
 }
 
@@ -342,8 +342,12 @@ extern "C" void sub_8234BD00(PPCContext& __restrict ctx, uint8_t* base) {
   if (real - counted > 4) {
     counted = real - 4;
   }
+  // Each call starts from the entry state; the caller sees the last call's result.
+  const PPCContext entry = ctx;
   for (; counted <= real; ++counted) {
-    __imp__sub_8234BD00(ctx, base);
+    PPCContext c = entry;
+    __imp__sub_8234BD00(c, base);
+    if (counted == real) ctx = c;
   }
 }
 
