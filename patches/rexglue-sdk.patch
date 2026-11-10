@@ -3873,7 +3873,7 @@ index d49e9c3..96b5f21 100644
                                                   uint16_t reset_index_guest_endian,
                                                   bool& is_reset_index_used_out,
 diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
-index ec0df7c..d5c2de3 100644
+index ec0df7c..82a6835 100644
 --- a/src/graphics/shared_memory.cpp
 +++ b/src/graphics/shared_memory.cpp
 @@ -15,11 +15,140 @@
@@ -4175,7 +4175,7 @@ index ec0df7c..d5c2de3 100644
      for (uint32_t i = valid_block_first; i <= valid_block_last; ++i) {
        uint64_t valid_bits = UINT64_MAX;
        if (i == valid_block_first) {
-@@ -306,15 +547,129 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
+@@ -306,13 +547,116 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
        uint64_t& gpu_written = system_page_flags_valid_and_gpu_written_[i];
        gpu_written = written_by_gpu ? (gpu_written | valid_bits) : (gpu_written & ~valid_bits);
      }
@@ -4216,23 +4216,12 @@ index ec0df7c..d5c2de3 100644
 +      for (uint32_t page = valid_page_first; page <= valid_page_last; ++page) {
 +        uint64_t page_bit = uint64_t(1) << (page & 63);
 +        uint64_t& hot_bits = system_page_flags_hot_[page >> 6];
-+        // Static data a game's renderer hooks registered (native_ranges) is drawn without
-+        // requesting it, so only a write fault notices the CPU changing it: never hot. A page
-+        // that became hot before a range was registered in it is protected again.
-+        const bool native_range =
-+            native_ranges::MayTouchRanges(page << page_size_log2_, uint32_t(page_size));
-+        if ((hot_bits & page_bit) && native_range) {
-+          hot_bits &= ~page_bit;
-+          hot_pages_[page].shadow.reset();
-+          --hot_page_count_;
-+          page_upload_counts_[page] = 0;
-+        }
 +        if (!(hot_bits & page_bit)) {
 +          uint8_t& upload_count = page_upload_counts_[page];
 +          if (upload_count < UINT8_MAX) {
 +            ++upload_count;
 +          }
-+          if (upload_count < hot_page_uploads || IsPageWatched(page) || native_range) {
++          if (upload_count < hot_page_uploads || IsPageWatched(page)) {
 +            if (!protect_page_runs_.empty() && protect_page_runs_.back().second + 1 == page) {
 +              protect_page_runs_.back().second = page;
 +            } else {
@@ -4262,9 +4251,9 @@ index ec0df7c..d5c2de3 100644
 +          run.first << page_size_log2_, (run.second - run.first + 1) << page_size_log2_, true,
 +          false);
 +    }
-   }
- }
- 
++  }
++}
++
 +bool SharedMemory::IsPageWatched(uint32_t page) const {
 +  uint32_t bucket = page << page_size_log2_ >> kWatchBucketSizeLog2;
 +  for (const WatchNode* node = watch_buckets_[bucket]; node != nullptr;
@@ -4272,7 +4261,7 @@ index ec0df7c..d5c2de3 100644
 +    if (node->range->page_first <= page && node->range->page_last >= page) {
 +      return true;
 +    }
-+  }
+   }
 +  return false;
 +}
 +
@@ -4303,12 +4292,10 @@ index ec0df7c..d5c2de3 100644
 +    page_upload_counts_[page] = 0;
 +  }
 +  return any_changed;
-+}
-+
+ }
+ 
  void SharedMemory::UnlinkWatchRange(WatchRange* range) {
-   uint32_t bucket = range->page_first << page_size_log2_ >> kWatchBucketSizeLog2;
-   WatchNode* node = range->node_first;
-@@ -343,8 +698,9 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+@@ -343,8 +687,9 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
    }
  
    // Some texture or buffer is empty, for example - safe to draw in this case.
@@ -4320,7 +4307,7 @@ index ec0df7c..d5c2de3 100644
    for (size_t i = 0; i < count; ++i) {
      uint32_t start = ranges[i].first;
      uint32_t length = ranges[i].second;
-@@ -361,11 +717,25 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+@@ -361,11 +706,25 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
    }
  
    SCOPE_profile_cpu_f("gpu");
@@ -4350,7 +4337,7 @@ index ec0df7c..d5c2de3 100644
    size_t merged_write = 0;
    for (size_t i = 1; i < merged_ranges.size(); ++i) {
      std::pair<uint32_t, uint32_t>& range_previous = merged_ranges[merged_write];
-@@ -403,55 +773,200 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+@@ -403,55 +762,197 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
      }
      upload_ranges_.emplace_back(page_start, page_count);
    };
@@ -4415,10 +4402,7 @@ index ec0df7c..d5c2de3 100644
 +              system_page_flags_valid_[i] &= ~(uint64_t(1) << bit);
 +              system_page_flags_valid_and_gpu_written_[i] &= ~(uint64_t(1) << bit);
 +              hot_page.unchanged_requests = 0;
-+            } else if (++hot_page.unchanged_requests >= kHotPageUnchangedRequestsToProtect ||
-+                       // A native range may be trusted after this request: protect at once.
-+                       native_ranges::MayTouchRanges(page << page_size_log2_,
-+                                                     uint32_t(page_size))) {
++            } else if (++hot_page.unchanged_requests >= kHotPageUnchangedRequestsToProtect) {
 +              hot_pages_to_protect_.push_back(page);
 +            }
 +          }
@@ -4588,7 +4572,7 @@ index ec0df7c..d5c2de3 100644
      }
    }
  
-@@ -461,11 +976,45 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+@@ -461,11 +962,45 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
    COUNT_profile_set("gpu/shared_memory/request_ranges_upload_count",
                      uint32_t(upload_ranges_.size()));
  
@@ -4635,7 +4619,7 @@ index ec0df7c..d5c2de3 100644
  }
  
  bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
-@@ -487,6 +1036,12 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+@@ -487,6 +1022,12 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
    length = std::min(length, kBufferSize - physical_address_start);
    uint32_t physical_address_last = physical_address_start + (length - 1);
  
@@ -4648,7 +4632,7 @@ index ec0df7c..d5c2de3 100644
    uint32_t page_first = physical_address_start >> page_size_log2_;
    uint32_t page_last = physical_address_last >> page_size_log2_;
    uint32_t block_first = page_first >> 6;
-@@ -494,7 +1049,17 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+@@ -494,7 +1035,17 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
  
    auto global_lock = global_critical_region_.Acquire();
  
@@ -4666,7 +4650,7 @@ index ec0df7c..d5c2de3 100644
      // Check if a somewhat wider range (up to 256 KB with 4 KB pages) can be
      // invalidated - if no GPU-written data nearby that was not intended to be
      // invalidated since it's not in sync with CPU memory and can't be
-@@ -514,6 +1079,28 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+@@ -514,6 +1065,28 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
        page_last =
            (page_last & ~uint32_t(63)) + (std::max(rex::tzcnt(gpu_written_end), uint8_t(1)) - 1);
      }
