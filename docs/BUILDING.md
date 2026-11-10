@@ -31,10 +31,15 @@ Requirements:
 .\build.ps1 -LlvmBin C:\path\to\llvm\bin   # a specific Clang
 ```
 
-Keep the repository in a short path (for example `C:\src\ProvingGroundRecomp`): some SDK
-files have long names. Other options: `-Jobs`, `-CodegenOnly`, `-NoStage`, `-SdkSource` (use
-an existing patched SDK tree), `-NoFidelityFX` (leave out AMD FidelityFX, which the FSR options
-need; Linux builds never include it), `-NoD3D12` (leave out the Direct3D 12 renderer and FSR 4).
+Some tools in the build fail on long paths (FidelityFX's shader compiler among them). From a
+folder longer than 40 characters, such as a Git worktree, `build.ps1` builds through a short
+junction to it, `C:\pgb\<hash>` (or `%LOCALAPPDATA%\pgb\<hash>`), made on the first build;
+the SDK tree from `-SdkSource` gets one too. A build folder configured from another path is
+built again from scratch. Set `PG_NO_SHORT_PATH=1` to build in place.
+
+Other options: `-Jobs`, `-CodegenOnly`, `-NoStage`, `-SdkSource` (use an existing patched
+SDK tree), `-NoFidelityFX` (leave out AMD FidelityFX, which the FSR options need; Linux builds
+never include it), `-NoD3D12` (leave out the Direct3D 12 renderer and FSR 4).
 Windows builds download AMD's signed FSR SDK 2.3.0 Direct3D 12 runtime
 (`amd_fidelityfx_loader_dx12.dll`, `amd_fidelityfx_upscaler_dx12.dll`) and check their hashes.
 
@@ -67,8 +72,9 @@ patch again from that tree, including new files:
 git add -N <new files> && git diff --binary HEAD > ../ProvingGroundRecomp/patches/rexglue-sdk.patch
 ```
 
-The build scripts note the patch hash in `thirdparty/rexglue-sdk/.pg-patch` and warn when
-the patch changes; delete `thirdparty/rexglue-sdk` to fetch and patch it again.
+The build scripts note the patch hash in `thirdparty/rexglue-sdk/.pg-patch`. When the patch
+changes, `build.ps1` takes the old one back out of `thirdparty/rexglue-sdk` and applies the new
+one; if that fails, delete `thirdparty/rexglue-sdk` to fetch and patch it again.
 
 ## IDEs
 

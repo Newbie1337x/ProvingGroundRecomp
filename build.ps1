@@ -31,6 +31,39 @@ $ErrorActionPreference = 'Stop'
 $FidelityFX = -not $NoFidelityFX
 $D3D12 = -not $NoD3D12
 $repo = $PSScriptRoot
+
+# Some tools in the build (FidelityFX's shader compiler among them) fail on long paths, which a
+# checkout in a deep folder or a Git worktree reaches easily. A long folder is built through a
+# short junction to it, C:\pgb\<hash> (one per folder, made on the first build), so every path
+# the build sees is short. Set PG_NO_SHORT_PATH=1 to build in place.
+function Get-ShortAlias([string]$Path, [string]$Prefix) {
+    $Path = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if ($Path.Length -le 40 -or $env:PG_NO_SHORT_PATH) { return $Path }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $hash = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Path.ToLowerInvariant()))[0..3] |
+        ForEach-Object { $_.ToString('x2') })
+    foreach ($root in @("$env:SystemDrive\pgb", (Join-Path $env:LOCALAPPDATA 'pgb'))) {
+        $alias = Join-Path $root "$Prefix$hash"
+        try {
+            $item = Get-Item -LiteralPath $alias -Force -ErrorAction SilentlyContinue
+            if ($item -and $item.LinkType -eq 'Junction' -and
+                ([IO.Path]::GetFullPath("$($item.Target)").TrimEnd('\') -ieq $Path)) {
+                return $alias
+            }
+            if ($item) { continue }  # Something else has the name: leave it alone.
+            New-Item -ItemType Directory -Force -Path $root -ErrorAction Stop | Out-Null
+            New-Item -ItemType Junction -Path $alias -Target $Path -ErrorAction Stop | Out-Null
+            return $alias
+        } catch {
+            continue
+        }
+    }
+    Write-Warning "Could not make a short path for $Path; building in place."
+    return $Path
+}
+$longRepo = $repo
+$repo = Get-ShortAlias $repo ''
+if ($repo -ne $longRepo) { Write-Host "Building through $repo (short path to $longRepo)" }
 $sdkTag = 'v0.10.0'
 $sdkUrl = 'https://github.com/rexglue/rexglue-sdk.git'
 $patch = Join-Path $repo 'patches\rexglue-sdk.patch'
@@ -92,14 +125,26 @@ if ($SdkSource) {
             '--init', '--recursive', '--depth', '1', '--jobs', '8') $sdk
         Set-Content -LiteralPath $submodulesMarker -Value 'ok' -Encoding ascii
     }
+    # The applied patch is kept next to the marker, so a changed patch replaces it: the old one is
+    # taken back out and the new one applied, without fetching the SDK again.
+    $applied = Join-Path $sdk '.pg-patch-applied'
+    if ((Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker -Raw).Trim() -ne $patchHash) {
+        if (Test-Path -LiteralPath $applied) {
+            Write-Host 'patches\rexglue-sdk.patch changed; applying it again to thirdparty\rexglue-sdk'
+            Invoke-Step 'sdk-unpatch' $git @('apply', '-R', '--whitespace=nowarn', $applied) $sdk
+            Remove-Item -LiteralPath $marker
+        } else {
+            Write-Warning ("patches\rexglue-sdk.patch changed since thirdparty\rexglue-sdk was patched. " +
+                'Delete thirdparty\rexglue-sdk to fetch and patch it again.')
+        }
+    }
     if (-not (Test-Path -LiteralPath $marker)) {
         Invoke-Step 'sdk-patch' $git @('apply', '--whitespace=nowarn', $patch) $sdk
+        Copy-Item -LiteralPath $patch -Destination $applied -Force
         Set-Content -LiteralPath $marker -Value $patchHash -Encoding ascii
-    } elseif ((Get-Content -LiteralPath $marker -Raw).Trim() -ne $patchHash) {
-        Write-Warning ("patches\rexglue-sdk.patch changed since thirdparty\rexglue-sdk was patched. " +
-            'Delete thirdparty\rexglue-sdk to fetch and patch it again.')
     }
 }
+$sdk = Get-ShortAlias $sdk 'sdk-'
 
 # --- Compiler environment ---
 $env:VSLANG = '1033'
@@ -134,6 +179,18 @@ Write-Host "Compiler: $clang"
 
 # --- Configure, build the code generator, generate, build the game ---
 $build = Join-Path $repo ("out\build\{0}" -f $Configuration.ToLowerInvariant())
+# A build folder configured from another path (before the short path, or after the folder moved)
+# cannot be reused: CMake refuses it. Build it again from scratch.
+$cache = Join-Path $build 'CMakeCache.txt'
+if (Test-Path -LiteralPath $cache) {
+    $cacheHome = Select-String -LiteralPath $cache -Pattern '^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$' |
+        Select-Object -First 1 | ForEach-Object { $_.Matches[0].Groups[1].Value }
+    if ($cacheHome -and ($cacheHome -replace '/', '\').TrimEnd('\') -ine $repo) {
+        Write-Host "out\build was configured from $cacheHome; configuring it again from $repo"
+        # FetchContent's sub-builds keep their own caches with the old path too.
+        Remove-Item -LiteralPath $build -Recurse -Force
+    }
+}
 $llvmTools = Split-Path -Parent $clang
 $vulkanArgs = @()
 if ($FidelityFX -and -not $env:VULKAN_SDK) {
