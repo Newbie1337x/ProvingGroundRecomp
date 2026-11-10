@@ -52,8 +52,10 @@ std::array<User, kUsers> g_users;
 bool g_menu_wanted = false;
 std::function<void(bool)> g_request_menu;
 
+// Only controllers that have reported a state: the filter runs only for connected ones, so a
+// mark on an empty slot would never clear and would keep that slot's keystrokes from the game.
 void WaitForReleaseLocked() {
-  for (auto& user : g_users) user.wait_release = true;
+  for (auto& user : g_users) user.wait_release = user.seen;
 }
 
 void FilterState(uint32_t user_index, rex::input::X_INPUT_STATE& state) {
@@ -99,11 +101,10 @@ void FilterState(uint32_t user_index, rex::input::X_INPUT_STATE& state) {
   if (request_menu) request_menu(request_open);
 }
 
-bool FilterKeystroke(uint32_t) {
+bool FilterKeystroke(uint32_t user_index) {
   std::lock_guard lock(g_mutex);
   if (g_menu_wanted) return false;
-  return std::none_of(g_users.begin(), g_users.end(),
-                      [](const User& user) { return user.wait_release; });
+  return user_index >= kUsers || !g_users[user_index].wait_release;
 }
 
 // The button keys Dear ImGui's gamepad navigation reads.
