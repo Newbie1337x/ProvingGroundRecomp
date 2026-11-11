@@ -1892,6 +1892,12 @@ void GameMenu::OnDraw(ImGuiIO& io) {
            "copies only cover what was drawn (about 2.7 ms of GPU time per frame at 1440p)."},
           {"Threaded submission", "vulkan_async_submission",
            "Records and submits Vulkan command buffers on a separate thread."},
+          {"Reuse adjacent samplers", "vulkan_reuse_adjacent_samplers",
+           "Keeps the previous draw's samplers when the next draw uses the same shaders and "
+           "sampler settings."},
+          {"GPU waits without spinning", "gpu_wait_without_spinning",
+           "The emulated GPU thread sleeps while it has nothing to do instead of keeping a core "
+           "busy."},
           {"Early vblank after swap", "vblank_after_swap",
            "Without vsync, delivers the game's vblank as soon as a swap is processed."},
       };

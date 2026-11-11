@@ -68,6 +68,7 @@ endif()
 set(PG_SOURCES
     src/main.cpp
     src/pg_buttons.cpp
+    src/pg_camera.cpp
     src/pg_dev.cpp
     src/pg_folder_picker.cpp
     src/pg_frame_pacing.cpp
@@ -79,6 +80,8 @@ set(PG_SOURCES
     src/pg_ui.cpp
     src/native/pg_d3d_trace.cpp
     src/native/pg_engine_hooks.cpp
+    src/native/pg_pass_stats.cpp
+    src/native/pg_occlusion_queries.cpp
 )
 if(WIN32)
     # The launcher window draws with Dear ImGui's Win32 and Direct3D 11 backends.

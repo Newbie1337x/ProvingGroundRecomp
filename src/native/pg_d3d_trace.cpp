@@ -6,6 +6,7 @@
 // rewritten every 10 seconds; tools/native/d3d_trace_report.py maps the return addresses to the
 // engine functions that make the calls, which is where a native renderer hooks the engine.
 #include "pg_d3d_trace.h"
+#include "pg_pass_stats.h"
 
 #include <algorithm>
 #include <array>
@@ -258,6 +259,7 @@ void OnSwapForTrace() {
       SampleArgs(k_##name, ctx, base);                                             \
     }                                                                              \
     if constexpr (k_##name == k_sub_82578638) {                                    \
+      pg::native::CountDrawForPassStats();                                         \
       if (pg::native::BeforeDrawIndexedVertices(ctx, base)) return;                \
     }                                                                              \
     __imp__##name(ctx, base);                                                       \

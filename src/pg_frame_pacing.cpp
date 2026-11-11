@@ -9,8 +9,10 @@
 // ran many times too fast. Here both intervals are 0, so the game doesn't wait for vblanks, and
 // the engine's counter only advances once per real 1/60 s.
 #include "pg_frame_pacing.h"
+#include "pg_camera.h"
 #include "pg_dev.h"
 #include "native/pg_d3d_trace.h"
+#include "native/pg_pass_stats.h"
 #include "native/pg_engine_mesh.h"
 
 #include <algorithm>
@@ -266,6 +268,7 @@ extern "C" void sub_824853A8(PPCContext& __restrict ctx, uint8_t* base) {
   TraceSwap(base, swap_start, swap_end, limit_end);
   CountFrame(limit_end);
   pg::native::OnSwapForTrace();
+  pg::native::OnSwapForPassStats(base);
   pg::native::OnSwapForEngineHooks();
   pg::dev::OnSwap(base);
 }
@@ -368,5 +371,6 @@ extern "C" void sub_824852F8(PPCContext& __restrict ctx, uint8_t* base) {
       main_loop_frames.fetch_add(1, std::memory_order_release);
     }
     main_loop_frame_ready.notify_one();
+    pg::OnMainLoopFrameForCamera(ctx, base);
   }
 }
